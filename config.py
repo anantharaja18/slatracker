@@ -81,6 +81,10 @@ CHECK_INTERVAL_MINUTES = 30
 # ---------------------------------------------------------------------------
 SEVERITY_FIELD = "customfield_10051"  # "Severity" custom field -- values are "Sev-1" / "Sev-2"
 
+# SLA override applied to every category, measured from ticket Created time:
+# Sev-1 = 1 hour, Sev-2 = 2 hours. Jira's own SLA timers are not used.
+SLA_MINUTES = {"Sev-1": 60, "Sev-2": 120}
+
 CATEGORIES = {
     "Retail": {
         "jql": (
@@ -94,7 +98,7 @@ CATEGORIES = {
         ),
         "breach_type": "sla_from_created",
         "severity_field": SEVERITY_FIELD,
-        "sla_minutes": {"Sev-1": 30, "Sev-2": 120},
+        "sla_minutes": SLA_MINUTES,
         "warn_hours": 2,
     },
     "SAC": {
@@ -108,7 +112,7 @@ CATEGORIES = {
         ),
         "breach_type": "sla_from_created",
         "severity_field": SEVERITY_FIELD,
-        "sla_minutes": {"Sev-1": 60, "Sev-2": 240},
+        "sla_minutes": SLA_MINUTES,
         "warn_hours": 2,
     },
     "B2B": {
@@ -124,7 +128,7 @@ CATEGORIES = {
         ),
         "breach_type": "sla_from_created",
         "severity_field": SEVERITY_FIELD,
-        "sla_minutes": {"Sev-1": 60, "Sev-2": 240},
+        "sla_minutes": SLA_MINUTES,
         "warn_hours": 4,
     },
     "Order Fallout": {
@@ -138,7 +142,7 @@ CATEGORIES = {
         ),
         "breach_type": "sla_from_created",
         "severity_field": SEVERITY_FIELD,
-        "sla_minutes": {"Sev-2": 240},
+        "sla_minutes": SLA_MINUTES,
         "warn_hours": 1,
     },
 }
