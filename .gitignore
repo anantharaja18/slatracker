@@ -1,0 +1,18 @@
+# Secrets
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Logs
+*.log
+
+# Reports / data
+*.xlsx
+notified_state.json
+
+# Local tooling
+.claude/
+.venv/
+venv/
