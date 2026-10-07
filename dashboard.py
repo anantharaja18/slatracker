@@ -6,6 +6,7 @@ Run with:
 """
 
 import html
+import itertools
 import io
 from collections import defaultdict
 from datetime import datetime
@@ -145,7 +146,7 @@ def jira_ticket_url(key):
 
 def bucket_popup_html(tickets):
     if not tickets:
-        return '<div class="bucket-popup"><div class="bucket-popup-inner"><div class="bucket-popup-empty">No tickets</div></div></div>'
+        return '<div class="bucket-popup-inner"><div class="bucket-popup-empty">No tickets</div></div>'
     items = "".join(
         f'<a class="bucket-popup-item" href="{html.escape(jira_ticket_url(t["key"]), quote=True)}" '
         f'target="_blank" rel="noopener noreferrer">'
@@ -153,12 +154,12 @@ def bucket_popup_html(tickets):
         f'<span class="bucket-popup-assignee" title="{html.escape(t["assignee"])}">{html.escape(t["assignee"])}</span></a>'
         for t in tickets
     )
-    return f'<div class="bucket-popup"><div class="bucket-popup-inner">{items}</div></div>'
+    return f'<div class="bucket-popup-inner">{items}</div>'
 
 
 def resolved_breach_popup_html(tickets):
     if not tickets:
-        return '<div class="bucket-popup"><div class="bucket-popup-inner"><div class="bucket-popup-empty">No tickets</div></div></div>'
+        return '<div class="bucket-popup-inner"><div class="bucket-popup-empty">No tickets</div></div>'
     items = "".join(
         f'<a class="bucket-popup-item" href="{html.escape(jira_ticket_url(t["key"]), quote=True)}" '
         f'target="_blank" rel="noopener noreferrer">'
@@ -167,7 +168,27 @@ def resolved_breach_popup_html(tickets):
         f'<span class="bucket-popup-assignee" title="{html.escape(t["assignee"])}">{html.escape(t["assignee"])}</span></a>'
         for t in tickets
     )
-    return f'<div class="bucket-popup"><div class="bucket-popup-inner">{items}</div></div>'
+    return f'<div class="bucket-popup-inner">{items}</div>'
+
+
+_popup_counter = itertools.count()
+
+
+def popup_row(row_inner_html, popup_inner_html, title):
+    """A bucket row that opens its ticket popup on click and keeps it open until
+    the close (x) button is clicked. CSS-only (hidden checkbox + labels) because
+    st.markdown HTML can't run JavaScript click handlers."""
+    popup_id = f"popup-toggle-{next(_popup_counter)}"
+    return (
+        f'<div class="popup-wrap">'
+        f'<input type="checkbox" id="{popup_id}" class="popup-toggle">'
+        f'<label for="{popup_id}" class="bucket-row has-popup">{row_inner_html}</label>'
+        f'<div class="bucket-popup"><div class="bucket-popup-box">'
+        f'<div class="bucket-popup-header"><span>{html.escape(title)}</span>'
+        f'<label for="{popup_id}" class="bucket-popup-close" title="Close">&times;</label></div>'
+        f'{popup_inner_html}</div></div>'
+        f'</div>'
+    )
 
 
 def escalated_tickets_with_links(df):
@@ -179,7 +200,7 @@ def escalated_tickets_with_links(df):
 
 def escalated_links_popup_html(tickets):
     if not tickets:
-        return '<div class="bucket-popup"><div class="bucket-popup-inner"><div class="bucket-popup-empty">No escalated tickets</div></div></div>'
+        return '<div class="bucket-popup-inner"><div class="bucket-popup-empty">No escalated tickets</div></div>'
     blocks = []
     for t in tickets:
         link_count = len(t["links"])
@@ -197,12 +218,12 @@ def escalated_links_popup_html(tickets):
             f'<span class="bucket-popup-assignee" title="{html.escape(l["summary"])}">{html.escape(l["summary"])}</span></a>'
             for l in t["links"]
         )
-    return f'<div class="bucket-popup"><div class="bucket-popup-inner">{"".join(blocks)}</div></div>'
+    return f'<div class="bucket-popup-inner">{"".join(blocks)}</div>'
 
 
 st.set_page_config(page_title="Jira Breach Monitor", page_icon="🔔", layout="wide")
 
-AUTO_REFRESH_SECONDS = 300  # matches load_category_data/load_resolved_data cache ttl
+AUTO_REFRESH_SECONDS = 60  # matches load_category_data/load_resolved_data cache ttl
 st_autorefresh(interval=AUTO_REFRESH_SECONDS * 1000, key="dashboard_autorefresh")
 
 st.markdown(
@@ -320,12 +341,27 @@ st.markdown(
             visibility: hidden; opacity: 0;
             transition: opacity 0.12s ease;
         }}
-        .bucket-popup-inner {{
+        .bucket-popup-box {{
             background: {SURFACE_CARD}; border: 1px solid rgba(255,255,255,0.12); border-radius: 10px;
             box-shadow: 0 12px 30px rgba(0,0,0,0.5); padding: 6px;
-            max-height: 260px; overflow-y: auto;
         }}
-        .bucket-row:hover .bucket-popup {{ visibility: visible; opacity: 1; }}
+        .bucket-popup-inner {{ max-height: 260px; overflow-y: auto; }}
+        .bucket-popup-header {{
+            display: flex; align-items: center; justify-content: space-between; gap: 12px;
+            padding: 2px 4px 6px 10px; margin-bottom: 4px; border-bottom: 1px solid rgba(255,255,255,0.08);
+            font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: {TEXT_MUTED};
+        }}
+        .bucket-popup-close {{
+            cursor: pointer; font-size: 1.1rem; line-height: 1; padding: 2px 8px; border-radius: 6px;
+            color: {TEXT_SECONDARY}; text-transform: none;
+        }}
+        .bucket-popup-close:hover {{ background: rgba(255,255,255,0.1); color: {TEXT_PRIMARY}; }}
+        .popup-wrap {{ position: relative; }}
+        .popup-toggle {{ display: none; }}
+        .bucket-row.has-popup {{ cursor: pointer; margin: 0; width: 100%; }}
+        .bucket-row.has-popup:hover {{ background: rgba(255,255,255,0.04); }}
+        .bucket-row.has-popup .label {{ cursor: pointer; }}
+        .popup-toggle:checked ~ .bucket-popup {{ visibility: visible; opacity: 1; z-index: 40; }}
         .bucket-popup-item {{
             display: flex; align-items: center; justify-content: space-between; gap: 14px;
             padding: 6px 10px; border-radius: 6px; text-decoration: none;
@@ -397,7 +433,7 @@ def extract_linked_issues(fields):
     return result
 
 
-@st.cache_data(ttl=300, show_spinner="Loading tickets...")
+@st.cache_data(ttl=AUTO_REFRESH_SECONDS, show_spinner="Loading tickets...")
 def load_category_data(category, cat_config):
     fields = ["summary", "status", "assignee", "priority", "created", "issuelinks",
               ESCALATION_PATH_FIELD, ESCALATION_PATH_OTHER_FIELD]
@@ -429,7 +465,7 @@ def load_category_data(category, cat_config):
     return pd.DataFrame(rows)
 
 
-@st.cache_data(ttl=300, show_spinner="Loading tickets...")
+@st.cache_data(ttl=AUTO_REFRESH_SECONDS, show_spinner="Loading tickets...")
 def load_resolved_data(category, cat_config):
     fields = ["summary", "status", "assignee", "created", "resolutiondate", cat_config["severity_field"]]
     issues = jira_client.search_issues(cat_config["resolved_jql"], fields=fields)
@@ -656,11 +692,12 @@ with resolved_section:
             f'<div class="bucket-row"><span class="label">'
             f'<span class="dot" style="background:{COLOR_GOOD};"></span>Within SLA</span>'
             f'<span class="value">{counts["within_sla"]}</span></div>'
-            f'<div class="bucket-row"><span class="label">'
-            f'<span class="dot" style="background:{COLOR_CRITICAL};"></span>Breached</span>'
-            f'<span class="value">{counts["breached"]}</span>'
-            f'{resolved_breach_popup_html(breached_tickets)}'
-            f'</div>'
+            + popup_row(
+                f'<span class="label"><span class="dot" style="background:{COLOR_CRITICAL};"></span>Breached</span>'
+                f'<span class="value">{counts["breached"]}</span>',
+                resolved_breach_popup_html(breached_tickets),
+                f"{category} — Breached",
+            )
         )
         col.markdown(
             f'<div class="bucket-card summary-card"><div class="bucket-card-head">{category}</div>{rows_html}</div>',
@@ -683,11 +720,12 @@ for col, category in zip(cols, config.CATEGORIES.keys()):
 
     buckets = compute_time_buckets(category_data[category])
     rows_html = "".join(
-        f'<div class="bucket-row">'
-        f'<span class="label"><span class="dot" style="background:{BUCKET_COLOR[b]};"></span>{b}</span>'
-        f'<span class="value">{buckets[b]["count"]}</span>'
-        f'{bucket_popup_html(buckets[b]["tickets"])}'
-        f'</div>'
+        popup_row(
+            f'<span class="label"><span class="dot" style="background:{BUCKET_COLOR[b]};"></span>{b}</span>'
+            f'<span class="value">{buckets[b]["count"]}</span>',
+            bucket_popup_html(buckets[b]["tickets"]),
+            f"{category} — {b}",
+        )
         for b in BUCKET_ORDER
     )
     col.markdown(
@@ -715,11 +753,18 @@ for col, category in zip(cols, config.CATEGORIES.keys()):
     else:
         escalated_tickets = escalated_tickets_with_links(category_data[category])
         rows_html = "".join(
-            f'<div class="bucket-row"><span class="label">'
-            f'<span class="dot" style="background:{status_dot_color(status)};"></span>{status}</span>'
-            f'<span class="value">{count}</span>'
-            f'{escalated_links_popup_html(escalated_tickets) if status.strip().lower() == "escalated" else ""}'
-            f'</div>'
+            popup_row(
+                f'<span class="label"><span class="dot" style="background:{status_dot_color(status)};"></span>{status}</span>'
+                f'<span class="value">{count}</span>',
+                escalated_links_popup_html(escalated_tickets),
+                f"{category} — Escalated",
+            )
+            if status.strip().lower() == "escalated"
+            else (
+                f'<div class="bucket-row"><span class="label">'
+                f'<span class="dot" style="background:{status_dot_color(status)};"></span>{status}</span>'
+                f'<span class="value">{count}</span></div>'
+            )
             for status, count in status_counts.items()
         )
     col.markdown(
