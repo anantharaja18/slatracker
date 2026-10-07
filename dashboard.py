@@ -175,20 +175,85 @@ _popup_counter = itertools.count()
 
 
 def popup_row(row_inner_html, popup_inner_html, title):
-    """A bucket row that opens its ticket popup on click and keeps it open until
-    the close (x) button is clicked. CSS-only (hidden checkbox + labels) because
-    st.markdown HTML can't run JavaScript click handlers."""
-    popup_id = f"popup-toggle-{next(_popup_counter)}"
+    """A bucket row whose ticket popup opens on hover and then stays open until
+    its close (x) button is clicked. Open/close is handled by POPUP_SCRIPT."""
+    popup_id = f"popup-{next(_popup_counter)}"
     return (
-        f'<div class="popup-wrap">'
-        f'<input type="checkbox" id="{popup_id}" class="popup-toggle">'
-        f'<label for="{popup_id}" class="bucket-row has-popup">{row_inner_html}</label>'
+        f'<div class="popup-wrap" data-popup-id="{popup_id}">'
+        f'<div class="bucket-row has-popup">{row_inner_html}</div>'
         f'<div class="bucket-popup"><div class="bucket-popup-box">'
         f'<div class="bucket-popup-header"><span>{html.escape(title)}</span>'
-        f'<label for="{popup_id}" class="bucket-popup-close" title="Close">&times;</label></div>'
+        f'<span class="bucket-popup-close" title="Close">&times;</span></div>'
         f'{popup_inner_html}</div></div>'
         f'</div>'
     )
+
+
+# Hovering a row opens its popup (closing any other open one); it then stays
+# open until its x is clicked. The open popup's id is remembered so it's
+# re-opened after a Streamlit rerun (e.g. the 1-minute auto-refresh) redraws it.
+POPUP_SCRIPT = """
+<script>
+(function () {
+  const win = window.parent && window.parent.document ? window.parent : window;
+  const doc = win.document;
+  if (win.__slaPopupsInstalled) return;
+  win.__slaPopupsInstalled = true;
+  win.__slaOpenPopup = null;
+
+  function setOpen(id) {
+    win.__slaOpenPopup = id;
+    doc.querySelectorAll(".popup-wrap.open").forEach(function (w) {
+      if (w.dataset.popupId !== id) w.classList.remove("open");
+    });
+    if (id) {
+      const w = doc.querySelector('.popup-wrap[data-popup-id="' + id + '"]');
+      if (w) openWrap(w);
+    }
+  }
+
+  // Shows a popup, flipping it to align with the row's right edge if it
+  // would otherwise run past the right side of the window.
+  function openWrap(w) {
+    w.classList.add("open");
+    const pop = w.querySelector(".bucket-popup");
+    if (!pop) return;
+    pop.classList.remove("align-right");
+    if (pop.getBoundingClientRect().right > doc.documentElement.clientWidth - 8) {
+      pop.classList.add("align-right");
+    }
+  }
+
+  // Row left under the pointer when a popup is closed; it must not instantly
+  // re-open, so it's ignored until the pointer moves off it.
+  let suppressRow = null;
+
+  doc.addEventListener("mouseover", function (e) {
+    const row = e.target.closest && e.target.closest(".has-popup");
+    if (suppressRow && row !== suppressRow) suppressRow = null;
+    if (!row || row === suppressRow) return;
+    const wrap = row.closest(".popup-wrap");
+    if (wrap && !wrap.classList.contains("open")) setOpen(wrap.dataset.popupId);
+  });
+
+  doc.addEventListener("click", function (e) {
+    if (e.target.closest && e.target.closest(".bucket-popup-close")) {
+      e.preventDefault();
+      setOpen(null);
+      const under = doc.elementFromPoint(e.clientX, e.clientY);
+      suppressRow = under && under.closest ? under.closest(".has-popup") : null;
+    }
+  });
+
+  new win.MutationObserver(function () {
+    const id = win.__slaOpenPopup;
+    if (!id) return;
+    const w = doc.querySelector('.popup-wrap[data-popup-id="' + id + '"]');
+    if (w && !w.classList.contains("open")) openWrap(w);
+  }).observe(doc.body, { childList: true, subtree: true });
+})();
+</script>
+"""
 
 
 def escalated_tickets_with_links(df):
@@ -237,7 +302,10 @@ st.markdown(
                 radial-gradient(circle at 100% 0%, rgba(31,111,235,0.18), transparent 45%),
                 {SURFACE_PAGE};
         }}
-        [data-testid="stMain"] {{ background: transparent; }}
+        [data-testid="stMain"] {{ background: transparent; overflow-x: hidden; }}
+        /* Keep the dashboard steady while Streamlit reruns (auto-refresh): no stale-element fade. */
+        [data-stale="true"] {{ opacity: 1 !important; transition: none !important; }}
+        html, body, [data-testid="stApp"], [data-testid="stAppViewContainer"] {{ overflow-x: hidden; }}
 
         .block-container, [data-testid="stMainBlockContainer"] {{
             background: {SURFACE_CARD};
@@ -338,8 +406,7 @@ st.markdown(
             position: absolute; left: 0; top: 100%; z-index: 30;
             width: max-content; min-width: 100%; max-width: 420px;
             padding-top: 4px;
-            visibility: hidden; opacity: 0;
-            transition: opacity 0.12s ease;
+            display: none;  /* not just invisible: hidden popups must not widen the page */
         }}
         .bucket-popup-box {{
             background: {SURFACE_CARD}; border: 1px solid rgba(255,255,255,0.12); border-radius: 10px;
@@ -357,11 +424,11 @@ st.markdown(
         }}
         .bucket-popup-close:hover {{ background: rgba(255,255,255,0.1); color: {TEXT_PRIMARY}; }}
         .popup-wrap {{ position: relative; }}
-        .popup-toggle {{ display: none; }}
-        .bucket-row.has-popup {{ cursor: pointer; margin: 0; width: 100%; }}
+        .bucket-row.has-popup {{ cursor: pointer; }}
         .bucket-row.has-popup:hover {{ background: rgba(255,255,255,0.04); }}
         .bucket-row.has-popup .label {{ cursor: pointer; }}
-        .popup-toggle:checked ~ .bucket-popup {{ visibility: visible; opacity: 1; z-index: 40; }}
+        .popup-wrap.open .bucket-popup {{ display: block; z-index: 40; }}
+        .bucket-popup.align-right {{ left: auto; right: 0; }}
         .bucket-popup-item {{
             display: flex; align-items: center; justify-content: space-between; gap: 14px;
             padding: 6px 10px; border-radius: 6px; text-decoration: none;
@@ -401,6 +468,7 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+st.html(POPUP_SCRIPT, unsafe_allow_javascript=True)
 
 ESCALATION_PATH_FIELD = "customfield_10883"
 ESCALATION_PATH_OTHER_FIELD = "customfield_10884"
@@ -433,7 +501,7 @@ def extract_linked_issues(fields):
     return result
 
 
-@st.cache_data(ttl=AUTO_REFRESH_SECONDS, show_spinner="Loading tickets...")
+@st.cache_data(ttl=AUTO_REFRESH_SECONDS, show_spinner=False)  # a spinner per load pushes the page down -> visible shaking
 def load_category_data(category, cat_config):
     fields = ["summary", "status", "assignee", "priority", "created", "issuelinks",
               ESCALATION_PATH_FIELD, ESCALATION_PATH_OTHER_FIELD]
@@ -465,7 +533,7 @@ def load_category_data(category, cat_config):
     return pd.DataFrame(rows)
 
 
-@st.cache_data(ttl=AUTO_REFRESH_SECONDS, show_spinner="Loading tickets...")
+@st.cache_data(ttl=AUTO_REFRESH_SECONDS, show_spinner=False)  # a spinner per load pushes the page down -> visible shaking
 def load_resolved_data(category, cat_config):
     fields = ["summary", "status", "assignee", "created", "resolutiondate", cat_config["severity_field"]]
     issues = jira_client.search_issues(cat_config["resolved_jql"], fields=fields)
