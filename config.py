@@ -78,6 +78,10 @@ CHECK_INTERVAL_MINUTES = 30
 # sla_minutes    -> {severity value: minutes to resolve, measured from Created}
 # warn_hours     -> how many hours before the deadline counts as
 #                   "About to Breach" (breach itself = deadline has passed)
+# inflow_jql     -> every ticket created today in the team's scope, whatever
+#                   its current status ("Inflow Today" on the dashboard)
+# backlog_jql    -> optional: open tickets created before today, for a team
+#                   whose "jql" only covers today's tickets (dashboard "Backlog")
 # ---------------------------------------------------------------------------
 SEVERITY_FIELD = "customfield_10051"  # "Severity" custom field -- values are "Sev-1" / "Sev-2"
 
@@ -85,16 +89,25 @@ SEVERITY_FIELD = "customfield_10051"  # "Severity" custom field -- values are "S
 # Sev-1 = 1 hour, Sev-2 = 2 hours. Jira's own SLA timers are not used.
 SLA_MINUTES = {"Sev-1": 60, "Sev-2": 120}
 
+# B2B tickets are counted only under B2B: Retail and SAC exclude them (keeping
+# tickets with no Account type) so no ticket shows up under two teams.
 CATEGORIES = {
     "Retail": {
         "jql": (
             'project = 10145 AND status in ("Waiting for support", '
             '"In Progress", Escalated) AND "Reporting Area[Dropdown]" = Retail '
+            'AND ("Account type[Dropdown]" != "B2B" OR "Account type[Dropdown]" is EMPTY) '
             'ORDER BY created DESC, status ASC, assignee ASC, "cf[10883]" DESC, key DESC'
         ),
         "resolved_jql": (
             'project = 10145 AND "Reporting Area[Dropdown]" = Retail '
+            'AND ("Account type[Dropdown]" != "B2B" OR "Account type[Dropdown]" is EMPTY) '
             'AND resolution is not EMPTY AND resolutiondate >= startofday()'
+        ),
+        "inflow_jql": (
+            'project = 10145 AND "Reporting Area[Dropdown]" = Retail '
+            'AND ("Account type[Dropdown]" != "B2B" OR "Account type[Dropdown]" is EMPTY) '
+            'AND created >= startofday()'
         ),
         "breach_type": "sla_from_created",
         "severity_field": SEVERITY_FIELD,
@@ -104,11 +117,26 @@ CATEGORIES = {
     "SAC": {
         "jql": (
             'project = SAC AND created >= startofday() AND "Reporting Area" != Retail '
-            'AND reporter != "SAC BOT" AND resolution is EMPTY AND status != "Waiting for customer"'
+            'AND reporter != "SAC BOT" AND resolution is EMPTY AND status != "Waiting for customer" '
+            'AND ("Account type[Dropdown]" != "B2B" OR "Account type[Dropdown]" is EMPTY)'
         ),
         "resolved_jql": (
             'project = SAC AND "Reporting Area" != Retail AND reporter != "SAC BOT" '
+            'AND ("Account type[Dropdown]" != "B2B" OR "Account type[Dropdown]" is EMPTY) '
             'AND resolution is not EMPTY AND resolutiondate >= startofday()'
+        ),
+        "inflow_jql": (
+            'project = SAC AND "Reporting Area" != Retail AND reporter != "SAC BOT" '
+            'AND ("Account type[Dropdown]" != "B2B" OR "Account type[Dropdown]" is EMPTY) '
+            'AND created >= startofday()'
+        ),
+        # SAC's "jql" above only covers tickets created today, so its open
+        # backlog (created before today, still open) needs its own query.
+        "backlog_jql": (
+            'project = SAC AND "Reporting Area" != Retail AND reporter != "SAC BOT" '
+            'AND ("Account type[Dropdown]" != "B2B" OR "Account type[Dropdown]" is EMPTY) '
+            'AND status NOT IN (Resolved, Closed, "Waiting for customer", Cancelled) '
+            'AND created <= startOfDay()'
         ),
         "breach_type": "sla_from_created",
         "severity_field": SEVERITY_FIELD,
@@ -126,6 +154,11 @@ CATEGORIES = {
             '"Reporting Area[Dropdown]" != "Order Fallout" '
             'AND resolution is not EMPTY AND resolutiondate >= startofday()'
         ),
+        "inflow_jql": (
+            'project = SAC AND "Account type[Dropdown]" = "B2B" AND '
+            '"Reporting Area[Dropdown]" != "Order Fallout" '
+            'AND created >= startofday()'
+        ),
         "breach_type": "sla_from_created",
         "severity_field": SEVERITY_FIELD,
         "sla_minutes": SLA_MINUTES,
@@ -139,6 +172,10 @@ CATEGORIES = {
         "resolved_jql": (
             'project = SAC AND "Reporting Area[Dropdown]" = "Order fallout" '
             'AND resolution is not EMPTY AND resolutiondate >= startofday()'
+        ),
+        "inflow_jql": (
+            'project = SAC AND "Reporting Area[Dropdown]" = "Order fallout" '
+            'AND created >= startofday()'
         ),
         "breach_type": "sla_from_created",
         "severity_field": SEVERITY_FIELD,
