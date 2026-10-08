@@ -335,6 +335,31 @@ def ticket_link_html(key, css_class="esc-key", title=""):
     )
 
 
+def ticket_details_view(df):
+    """Ticket Details table: S.No from 1, Key as a Jira URL (rendered as a
+    link), readable Created time, and internal columns dropped."""
+    def fmt_created(raw):
+        dt = breach_logic._parse_datetime(raw)
+        return dt.strftime("%Y-%m-%d %H:%M") if dt else ""
+
+    view = pd.DataFrame({
+        "S.No": range(1, len(df) + 1),
+        "Key": df["Key"].map(jira_ticket_url),
+        "Summary": df["Summary"],
+        "Status": df["Status"],
+        "Priority": df["Priority"],
+        "Severity": df["Severity"],
+        "Assignee": df["Assignee"],
+        "Created": df["Created"].map(fmt_created),
+        "Due": df["Due"],
+        "Hours Remaining": df["Hours Remaining"],
+        "Breach Status": df["Breach Status"],
+        "Escalation Path": df["Escalation Path"],
+        "Linked Tickets": df["Linked Issues"].map(lambda links: ", ".join(l["key"] for l in links or [])),
+    })
+    return view.reset_index(drop=True)
+
+
 def escalated_table_html(df):
     """Escalated tickets as an HTML table (st.dataframe can't hold several links
     in one cell): S.No from 1, the ticket key and each linked ticket open in
@@ -1160,9 +1185,18 @@ for tab, (category, cat_config) in zip(tabs, config.CATEGORIES.items()):
         shown = df[df["Breach Status"].isin(breach_filter)] if breach_filter else df
 
         st.dataframe(
-            shown.style.map(style_status, subset=["Breach Status"]),
+            ticket_details_view(shown).style.map(style_status, subset=["Breach Status"])
+            .format({"Hours Remaining": "{:.1f}"}, na_rep=""),
             use_container_width=True,
             height=500,
+            hide_index=True,
+            column_config={
+                "S.No": st.column_config.NumberColumn("S.No", width="small"),
+                # The cell holds the Jira URL; only the key is displayed.
+                "Key": st.column_config.LinkColumn("Key", display_text=r".*/browse/(.*)$"),
+                "Summary": st.column_config.TextColumn("Summary", width="large"),
+                "Hours Remaining": st.column_config.NumberColumn("Hours Remaining", format="%.1f"),
+            },
         )
 
 # ---------------------------------------------------------------------------
