@@ -86,8 +86,8 @@ CHECK_INTERVAL_MINUTES = 30
 SEVERITY_FIELD = "customfield_10051"  # "Severity" custom field -- values are "Sev-1" / "Sev-2"
 
 # SLA override applied to every category, measured from ticket Created time:
-# Sev-1 = 1 hour, Sev-2 = 2 hours. Jira's own SLA timers are not used.
-SLA_MINUTES = {"Sev-1": 60, "Sev-2": 120}
+# Sev-1 = 1 hour, Sev-2 = 4 hours. Jira's own SLA timers are not used.
+SLA_MINUTES = {"Sev-1": 60, "Sev-2": 240}
 
 # B2B tickets are counted only under B2B: Retail and SAC exclude them (keeping
 # tickets with no Account type) so no ticket shows up under two teams.

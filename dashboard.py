@@ -190,6 +190,10 @@ def severity_tag_html(severity):
 
 _popup_counter = itertools.count()
 
+# Export groups for the section-level "Download breached" buttons.
+TTR_BREACHED_GROUP = "ttr-breached"            # Time to Resolve: Breached (Past) + Breached Today
+RESOLVED_BREACHED_GROUP = "resolved-breached"  # Today's inflow: Resolved late + Open, breached
+
 DOWNLOAD_ICON_SVG = (
     '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" '
     'stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">'
@@ -197,13 +201,15 @@ DOWNLOAD_ICON_SVG = (
 )
 
 
-def popup_row(row_inner_html, popup_inner_html, title, row_class="bucket-row"):
+def popup_row(row_inner_html, popup_inner_html, title, row_class="bucket-row", export_group=None):
     """A bucket row (or other element, via row_class) whose ticket popup opens
     on hover and closes a few seconds after the pointer leaves it (or via its
-    x). Handled by POPUP_SCRIPT."""
+    x). Handled by POPUP_SCRIPT. Popups sharing an export_group are downloaded
+    together by a section_title_with_download() button."""
     popup_id = f"popup-{next(_popup_counter)}"
+    group_attr = f' data-export-group="{html.escape(export_group, quote=True)}"' if export_group else ""
     return (
-        f'<div class="popup-wrap" data-popup-id="{popup_id}">'
+        f'<div class="popup-wrap" data-popup-id="{popup_id}"{group_attr}>'
         f'<div class="{row_class} has-popup">{row_inner_html}</div>'
         f'<div class="bucket-popup"><div class="bucket-popup-box">'
         f'<div class="bucket-popup-header"><span class="bucket-popup-title">{html.escape(title)}</span>'
@@ -212,6 +218,17 @@ def popup_row(row_inner_html, popup_inner_html, title, row_class="bucket-row"):
         f'<span class="bucket-popup-close" title="Close">&times;</span></span></div>'
         f'{popup_inner_html}</div></div>'
         f'</div>'
+    )
+
+
+def section_title_with_download(title_html, export_group, button_label, file_name):
+    """A section title bar with a button on the right that downloads every
+    popup in export_group as one CSV."""
+    return (
+        f'<div class="section-title section-title-bar"><span>{title_html}</span>'
+        f'<span class="section-download" data-export-group="{html.escape(export_group, quote=True)}" '
+        f'data-file-name="{html.escape(file_name, quote=True)}" title="Download as CSV">'
+        f'{DOWNLOAD_ICON_SVG}<span>{html.escape(button_label)}</span></span></div>'
     )
 
 
@@ -319,17 +336,23 @@ POPUP_SCRIPT = """
   function csvCell(v) {
     return '"' + String(v == null ? "" : v).replace(/"/g, '""') + '"';
   }
-  function downloadPopup(wrap) {
-    const items = wrap.querySelectorAll(".bucket-popup-item");
-    if (!items.length) return;
-    const titleEl = wrap.querySelector(".bucket-popup-title");
-    const title = titleEl ? titleEl.textContent.trim() : "tickets";
-    const lines = [["S.No", "List", "Key", "Severity", "Status", "Assignee", "Due", "Summary", "Jira Link"]];
-    items.forEach(function (a, i) {
-      const d = a.dataset;
-      const key = d.key || (a.querySelector(".bucket-popup-key") || a).textContent.trim();
-      lines.push([i + 1, title, key, d.severity, d.status, d.assignee, d.due, d.summary, a.href]);
+  // One or more popups into one CSV. Popup titles are "Team, em dash, List".
+  // (No angle brackets in this script: Streamlit's HTML handling drops it.)
+  const TITLE_SEP = " " + String.fromCharCode(8212) + " ";
+  function downloadPopups(wraps, fileBase) {
+    const lines = [["S.No", "Team", "List", "Key", "Severity", "Status", "Assignee", "Due", "Summary", "Jira Link"]];
+    wraps.forEach(function (wrap) {
+      const titleEl = wrap.querySelector(".bucket-popup-title");
+      const parts = (titleEl ? titleEl.textContent.trim() : "").split(TITLE_SEP);
+      const team = parts.length > 1 ? parts[0] : "";
+      const list = parts.length > 1 ? parts.slice(1).join(TITLE_SEP) : parts[0];
+      wrap.querySelectorAll(".bucket-popup-item").forEach(function (a) {
+        const d = a.dataset;
+        const key = d.key || (a.querySelector(".bucket-popup-key") || a).textContent.trim();
+        lines.push([lines.length, team, list, key, d.severity, d.status, d.assignee, d.due, d.summary, a.href]);
+      });
     });
+    if (lines.length < 2) return;
     const csv = "\\ufeff" + lines.map(function (r) { return r.map(csvCell).join(","); }).join("\\r\\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
@@ -337,7 +360,7 @@ POPUP_SCRIPT = """
     const now = new Date();  // local date, not UTC, so it matches the dashboard's "today"
     const stamp = now.getFullYear() + "-" + String(now.getMonth() + 1).padStart(2, "0") + "-" + String(now.getDate()).padStart(2, "0");
     link.href = url;
-    link.download = title.replace(/[^A-Za-z0-9]+/g, "_").replace(/^_|_$/g, "") + "_" + stamp + ".csv";
+    link.download = fileBase.replace(/[^A-Za-z0-9]+/g, "_").replace(/^_|_$/g, "") + "_" + stamp + ".csv";
     doc.body.appendChild(link);
     link.click();
     link.remove();
@@ -348,7 +371,17 @@ POPUP_SCRIPT = """
     const dl = e.target.closest && e.target.closest(".bucket-popup-download");
     if (dl) {
       e.preventDefault();
-      downloadPopup(dl.closest(".popup-wrap"));
+      const wrap = dl.closest(".popup-wrap");
+      const titleEl = wrap.querySelector(".bucket-popup-title");
+      downloadPopups([wrap], titleEl ? titleEl.textContent.trim() : "tickets");
+      return;
+    }
+    // Section-level download: every popup tagged with the same export group.
+    const sdl = e.target.closest && e.target.closest(".section-download");
+    if (sdl) {
+      e.preventDefault();
+      const group = sdl.dataset.exportGroup;
+      downloadPopups(doc.querySelectorAll('.popup-wrap[data-export-group="' + group + '"]'), sdl.dataset.fileName || group);
       return;
     }
     if (e.target.closest && e.target.closest(".bucket-popup-close")) {
@@ -545,6 +578,14 @@ st.markdown(
             border: 1px solid rgba(255,255,255,0.08); border-radius: 8px;
             padding: 7px 14px; margin: 6px 0 2px 0;
         }}
+        .section-title-bar {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; }}
+        .section-download {{
+            display: inline-flex; align-items: center; gap: 6px; cursor: pointer; flex-shrink: 0;
+            padding: 3px 10px; margin: -3px -6px -3px 0; border-radius: 6px;
+            border: 1px solid rgba(255,255,255,0.14); color: {TEXT_SECONDARY};
+            font-size: 0.66rem; letter-spacing: 0.04em;
+        }}
+        .section-download:hover {{ background: rgba(255,255,255,0.08); color: {TEXT_PRIMARY}; }}
 
         .bucket-card {{
             border: 1px solid rgba(255,255,255,0.08); border-radius: 12px;
@@ -987,10 +1028,32 @@ ok_categories = {c: df for c, df in category_data.items() if c not in category_e
 # ---------------------------------------------------------------------------
 # Header: title, overall resolved/SLA summary, refresh button
 # ---------------------------------------------------------------------------
-# Today SLA is judged only on tickets created today and resolved today;
-# tickets resolved from past inflow are counted separately.
+# Open tickets bucketed by time to resolve, per team. A team whose open query
+# only covers today's tickets also gets its backlog (older open tickets), so
+# past breaches show up too. Used by Time to Resolve and by Today SLA.
+open_buckets = {}
+for category in config.CATEGORIES:
+    if category in category_errors:
+        continue
+    open_df = category_data[category]
+    if category in backlog_data:
+        open_df = pd.concat([open_df, backlog_data[category]], ignore_index=True)
+    open_buckets[category] = compute_time_buckets(open_df)
+
+
+def today_sla_pct(within_sla, breached_resolved, breached_open):
+    """Today SLA: tickets resolved today within SLA, out of everything judged
+    today -- resolved today (within or breached) plus open tickets whose SLA
+    ran out today."""
+    judged = within_sla + breached_resolved + breached_open
+    return round(within_sla / judged * 100, 1) if judged else None
+
+
+# Today SLA is judged on tickets created and resolved today, plus open tickets
+# that breached today; tickets resolved from past inflow are counted separately.
 today_within_sla = 0
 today_breached = 0
+today_breached_open = 0
 resolved_today_inflow_count = 0
 resolved_past_inflow_count = 0
 for category, df in resolved_data.items():
@@ -1002,8 +1065,9 @@ for category, df in resolved_data.items():
     today_breached += counts["breached"]
     resolved_today_inflow_count += len(today_df)
     resolved_past_inflow_count += len(df) - len(today_df)
-today_judged = today_within_sla + today_breached
-today_pct = round(today_within_sla / today_judged * 100, 1) if today_judged else None
+    if category in open_buckets:
+        today_breached_open += open_buckets[category][BUCKET_BREACHED_TODAY]["count"]
+today_pct = today_sla_pct(today_within_sla, today_breached, today_breached_open)
 today_pct_display = "—" if today_pct is None else f"{today_pct:.0f}%"
 
 # Team scopes can overlap (e.g. SAC covers every non-Retail SAC ticket), so
@@ -1041,7 +1105,7 @@ with header_col2:
         f'<div class="overall-stat-value">{resolved_today_inflow_count}</div>'
         '<div class="overall-stat-label">Resolved from Today Inflow</div></div>'
         '<div class="overall-divider"></div>'
-        '<div class="overall-stat" title="Within SLA / (Within SLA + Breached), for tickets created and resolved today">'
+        '<div class="overall-stat" title="Within SLA / (Within SLA + Resolved late + Open, breached today)">'
         f'<div class="overall-stat-value" style="color:{sla_pct_color(today_pct)};">{today_pct_display}</div>'
         '<div class="overall-stat-label">Today SLA</div></div>'
         '</div>',
@@ -1101,7 +1165,13 @@ with open_section:
         )
 
 with resolved_section:
-    st.markdown('<div class="section-title">Total Resolved Tickets &mdash; Today\'s Inflow</div>', unsafe_allow_html=True)
+    st.markdown(
+        section_title_with_download(
+            "Total Resolved Tickets &mdash; Today's Inflow", RESOLVED_BREACHED_GROUP,
+            "Download breached", "Breached_todays_inflow_all_teams",
+        ),
+        unsafe_allow_html=True,
+    )
     cols = st.columns(len(config.CATEGORIES))
     for col, category in zip(cols, config.CATEGORIES.keys()):
         if category in resolved_errors:
@@ -1117,7 +1187,9 @@ with resolved_section:
         from_inflow, from_backlog = resolved_split(resolved_data[category])
         today_df = todays_inflow_resolved(resolved_data[category])
         counts = compute_resolved_counts(today_df)
-        pct_display = "—" if counts["pct"] is None else f'{counts["pct"]:.0f}%'
+        breached_open = open_buckets.get(category, {}).get(BUCKET_BREACHED_TODAY, {"count": 0, "tickets": []})
+        pct = today_sla_pct(counts["within_sla"], counts["breached"], breached_open["count"])
+        pct_display = "—" if pct is None else f"{pct:.0f}%"
         rows_html = (
             '<div class="mini-stats">'
             + popup_row(
@@ -1128,7 +1200,7 @@ with resolved_section:
                 row_class="mini-stat",
             )
             + '<div class="mini-stat-divider"></div>'
-            + mini_stat(pct_display, "Today SLA", sla_pct_color(counts["pct"]))
+            + mini_stat(pct_display, "Today SLA", sla_pct_color(pct))
             + '</div>'
             + popup_row(
                 f'<span class="label"><span class="dot" style="background:{COLOR_GOOD};"></span>Within SLA</span>'
@@ -1137,10 +1209,18 @@ with resolved_section:
                 f"{category} — Within SLA (today's inflow)",
             )
             + popup_row(
-                f'<span class="label"><span class="dot" style="background:{COLOR_CRITICAL};"></span>Breached</span>'
+                f'<span class="label"><span class="dot" style="background:{COLOR_CRITICAL};"></span>Resolved late</span>'
                 f'<span class="value">{counts["breached"]}</span>',
                 bucket_popup_html(resolved_tickets_by_status(today_df, breach_logic.STATUS_BREACHED)),
-                f"{category} — Breached (today's inflow)",
+                f"{category} — Resolved late (today's inflow)",
+                export_group=RESOLVED_BREACHED_GROUP,
+            )
+            + popup_row(
+                f'<span class="label"><span class="dot" style="background:{BUCKET_COLOR[BUCKET_BREACHED_TODAY]};"></span>Open, breached</span>'
+                f'<span class="value">{breached_open["count"]}</span>',
+                bucket_popup_html(breached_open["tickets"]),
+                f"{category} — Open, breached today",
+                export_group=RESOLVED_BREACHED_GROUP,
             )
             + '<div class="bucket-subcaption">Also resolved today</div>'
             + popup_row(
@@ -1158,7 +1238,13 @@ with resolved_section:
 # ---------------------------------------------------------------------------
 # Section: Time to Resolve - Open Tickets
 # ---------------------------------------------------------------------------
-st.markdown('<div class="section-title">Time to Resolve &mdash; Open Tickets</div>', unsafe_allow_html=True)
+st.markdown(
+    section_title_with_download(
+        "Time to Resolve &mdash; Open Tickets", TTR_BREACHED_GROUP,
+        "Download breached", "Breached_open_tickets_all_teams",
+    ),
+    unsafe_allow_html=True,
+)
 cols = st.columns(len(config.CATEGORIES))
 for col, category in zip(cols, config.CATEGORIES.keys()):
     if category in category_errors:
@@ -1169,18 +1255,14 @@ for col, category in zip(cols, config.CATEGORIES.keys()):
         )
         continue
 
-    open_df = category_data[category]
-    if category in backlog_data:
-        # This team's open query only covers today's tickets; add its backlog
-        # (older open tickets) so past breaches show up here too.
-        open_df = pd.concat([open_df, backlog_data[category]], ignore_index=True)
-    buckets = compute_time_buckets(open_df)
+    buckets = open_buckets[category]
     rows_html = "".join(
         popup_row(
             f'<span class="label"><span class="dot" style="background:{BUCKET_COLOR[b]};"></span>{b}</span>'
             f'<span class="value">{buckets[b]["count"]}</span>',
             bucket_popup_html(buckets[b]["tickets"]),
             f"{category} — {b}",
+            export_group=TTR_BREACHED_GROUP if b in (BUCKET_BREACHED_PAST, BUCKET_BREACHED_TODAY) else None,
         )
         for b in BUCKET_ORDER
     )
