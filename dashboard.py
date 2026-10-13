@@ -101,6 +101,13 @@ STATUS_DOT_COLOR = {
 }
 DEFAULT_STATUS_DOT_COLOR = "#5b5b56"
 
+# Severity tag in ticket popups: (background, text). Anything else (e.g. N/A)
+# falls back to a neutral gray.
+SEVERITY_TAG_COLORS = {
+    "Sev-1": ("#7c4dff", "white"),  # violet
+    "Sev-2": ("#0e7fa6", "white"),  # teal-blue
+}
+
 
 def status_dot_color(status):
     return STATUS_DOT_COLOR.get((status or "").strip().lower(), DEFAULT_STATUS_DOT_COLOR)
@@ -117,7 +124,7 @@ def open_tickets_with_status(df, status):
     if df.empty:
         return []
     matched = df[df["Status"].str.strip().str.lower() == status]
-    return [{"key": row["Key"], "assignee": row["Assignee"]} for _, row in matched.iterrows()]
+    return tickets_list(matched)
 
 
 def bucket_for(hours_remaining, due_dt):
@@ -145,7 +152,7 @@ def compute_time_buckets(df):
     for _, row in df.iterrows():
         b = bucket_for(row["Hours Remaining"], row["Due Datetime"])
         buckets[b]["count"] += 1
-        buckets[b]["tickets"].append({"key": row["Key"], "assignee": row["Assignee"]})
+        buckets[b]["tickets"].append(popup_ticket(row))
     return buckets
 
 
@@ -156,31 +163,38 @@ def jira_ticket_url(key):
 def bucket_popup_html(tickets):
     if not tickets:
         return '<div class="bucket-popup-inner"><div class="bucket-popup-empty">No tickets</div></div>'
+    # data-* attributes feed the popup's CSV download (see POPUP_SCRIPT).
     items = "".join(
         f'<a class="bucket-popup-item" href="{html.escape(jira_ticket_url(t["key"]), quote=True)}" '
-        f'target="_blank" rel="noopener noreferrer">'
+        f'target="_blank" rel="noopener noreferrer" '
+        f'data-key="{html.escape(t["key"], quote=True)}" '
+        f'data-severity="{html.escape(t.get("severity") or "", quote=True)}" '
+        f'data-assignee="{html.escape(t["assignee"], quote=True)}" '
+        f'data-status="{html.escape(t.get("status") or "", quote=True)}" '
+        f'data-due="{html.escape(t.get("due") or "", quote=True)}" '
+        f'data-summary="{html.escape(t.get("summary") or "", quote=True)}">'
         f'<span class="bucket-popup-key">{html.escape(t["key"])}</span>'
+        f'{severity_tag_html(t.get("severity"))}'
         f'<span class="bucket-popup-assignee" title="{html.escape(t["assignee"])}">{html.escape(t["assignee"])}</span></a>'
         for t in tickets
     )
     return f'<div class="bucket-popup-inner">{items}</div>'
 
 
-def resolved_breach_popup_html(tickets):
-    if not tickets:
-        return '<div class="bucket-popup-inner"><div class="bucket-popup-empty">No tickets</div></div>'
-    items = "".join(
-        f'<a class="bucket-popup-item" href="{html.escape(jira_ticket_url(t["key"]), quote=True)}" '
-        f'target="_blank" rel="noopener noreferrer">'
-        f'<span class="bucket-popup-key">{html.escape(t["key"])}</span>'
-        f'<span class="bucket-popup-tag" style="background:{BUCKET_COLOR[t["timing"]]};">{html.escape(t["timing"])}</span>'
-        f'<span class="bucket-popup-assignee" title="{html.escape(t["assignee"])}">{html.escape(t["assignee"])}</span></a>'
-        for t in tickets
-    )
-    return f'<div class="bucket-popup-inner">{items}</div>'
+def severity_tag_html(severity):
+    if not severity:
+        return ""
+    bg, fg = SEVERITY_TAG_COLORS.get(severity, (DEFAULT_STATUS_DOT_COLOR, TEXT_PRIMARY))
+    return f'<span class="bucket-popup-tag" style="background:{bg};color:{fg};">{html.escape(severity)}</span>'
 
 
 _popup_counter = itertools.count()
+
+DOWNLOAD_ICON_SVG = (
+    '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" '
+    'stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">'
+    '<path d="M12 4v11"/><path d="M7 10l5 5 5-5"/><path d="M5 20h14"/></svg>'
+)
 
 
 def popup_row(row_inner_html, popup_inner_html, title, row_class="bucket-row"):
@@ -192,8 +206,10 @@ def popup_row(row_inner_html, popup_inner_html, title, row_class="bucket-row"):
         f'<div class="popup-wrap" data-popup-id="{popup_id}">'
         f'<div class="{row_class} has-popup">{row_inner_html}</div>'
         f'<div class="bucket-popup"><div class="bucket-popup-box">'
-        f'<div class="bucket-popup-header"><span>{html.escape(title)}</span>'
-        f'<span class="bucket-popup-close" title="Close">&times;</span></div>'
+        f'<div class="bucket-popup-header"><span class="bucket-popup-title">{html.escape(title)}</span>'
+        f'<span class="bucket-popup-actions">'
+        f'<span class="bucket-popup-download" title="Download this list (CSV)">{DOWNLOAD_ICON_SVG}</span>'
+        f'<span class="bucket-popup-close" title="Close">&times;</span></span></div>'
         f'{popup_inner_html}</div></div>'
         f'</div>'
     )
@@ -298,7 +314,43 @@ POPUP_SCRIPT = """
     }
   });
 
+  // Saves a popup's ticket list as CSV, built from the popup's own rows so it
+  // always matches the count that was hovered.
+  function csvCell(v) {
+    return '"' + String(v == null ? "" : v).replace(/"/g, '""') + '"';
+  }
+  function downloadPopup(wrap) {
+    const items = wrap.querySelectorAll(".bucket-popup-item");
+    if (!items.length) return;
+    const titleEl = wrap.querySelector(".bucket-popup-title");
+    const title = titleEl ? titleEl.textContent.trim() : "tickets";
+    const lines = [["S.No", "List", "Key", "Severity", "Status", "Assignee", "Due", "Summary", "Jira Link"]];
+    items.forEach(function (a, i) {
+      const d = a.dataset;
+      const key = d.key || (a.querySelector(".bucket-popup-key") || a).textContent.trim();
+      lines.push([i + 1, title, key, d.severity, d.status, d.assignee, d.due, d.summary, a.href]);
+    });
+    const csv = "\\ufeff" + lines.map(function (r) { return r.map(csvCell).join(","); }).join("\\r\\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = doc.createElement("a");
+    const now = new Date();  // local date, not UTC, so it matches the dashboard's "today"
+    const stamp = now.getFullYear() + "-" + String(now.getMonth() + 1).padStart(2, "0") + "-" + String(now.getDate()).padStart(2, "0");
+    link.href = url;
+    link.download = title.replace(/[^A-Za-z0-9]+/g, "_").replace(/^_|_$/g, "") + "_" + stamp + ".csv";
+    doc.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  }
+
   doc.addEventListener("click", function (e) {
+    const dl = e.target.closest && e.target.closest(".bucket-popup-download");
+    if (dl) {
+      e.preventDefault();
+      downloadPopup(dl.closest(".popup-wrap"));
+      return;
+    }
     if (e.target.closest && e.target.closest(".bucket-popup-close")) {
       e.preventDefault();
       cancelOpen();
@@ -474,8 +526,8 @@ st.markdown(
         .header-spacer {{ height: 2px; }}
 
         .overall-summary {{
-            display: flex; align-items: center; justify-content: center; gap: 18px;
-            height: 100%; padding: 8px 20px;
+            display: flex; align-items: center; justify-content: space-evenly; gap: 12px;
+            height: 100%; padding: 10px 16px;
             background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08);
             border-radius: 12px;
         }}
@@ -483,7 +535,7 @@ st.markdown(
         .overall-stat-value {{ font-size: 1.1rem; font-weight: 700; color: {TEXT_PRIMARY}; line-height: 1.1; }}
         .overall-stat-label {{
             font-size: 0.6rem; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase;
-            color: {TEXT_MUTED}; margin-top: 2px;
+            color: {TEXT_MUTED}; margin-top: 2px; white-space: nowrap;
         }}
         .overall-divider {{ width: 1px; height: 28px; background: rgba(255,255,255,0.12); }}
 
@@ -511,7 +563,7 @@ st.markdown(
             display: flex; align-items: center; justify-content: space-evenly;
             padding: 10px 2px; background: rgba(255,255,255,0.03);
         }}
-        .mini-stats-grow {{ flex: 1; }}  /* open cards: fill the height the resolved cards set */
+        .summary-card .mini-stats {{ flex: 1; }}  /* strips absorb any height difference between cards */
         .mini-stat {{ text-align: center; padding: 4px 3px; border-radius: 8px; min-width: 0; }}
         .mini-stat.has-popup {{ cursor: pointer; }}
         .mini-stat.has-popup:hover {{ background: rgba(255,255,255,0.06); }}
@@ -557,6 +609,13 @@ st.markdown(
             color: {TEXT_SECONDARY}; text-transform: none;
         }}
         .bucket-popup-close:hover {{ background: rgba(255,255,255,0.1); color: {TEXT_PRIMARY}; }}
+        .bucket-popup-actions {{ display: flex; align-items: center; gap: 2px; flex-shrink: 0; }}
+        .bucket-popup-download {{
+            cursor: pointer; display: flex; align-items: center; padding: 4px 7px; border-radius: 6px;
+            color: {TEXT_SECONDARY};
+        }}
+        .bucket-popup-download:hover {{ background: rgba(255,255,255,0.1); color: {TEXT_PRIMARY}; }}
+        .bucket-popup-box:not(:has(.bucket-popup-item)) .bucket-popup-download {{ display: none; }}
         .popup-wrap {{ position: relative; }}
         .bucket-row.has-popup {{ cursor: pointer; }}
         .bucket-row.has-popup:hover {{ background: rgba(255,255,255,0.04); }}
@@ -574,6 +633,7 @@ st.markdown(
             font-size: 0.6rem; font-weight: 700; padding: 2px 7px; border-radius: 999px;
             color: white; white-space: nowrap; flex-shrink: 0;
         }}
+        .bucket-popup-key + .bucket-popup-tag {{ margin-left: -6px; margin-right: auto; }}  /* sits next to the key */
         .bucket-popup-key {{ font-weight: 700; color: {TEXT_PRIMARY}; white-space: nowrap; flex-shrink: 0; }}
         .bucket-popup-assignee {{
             text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -716,17 +776,19 @@ def load_resolved_data(category, cat_config):
 
 @st.cache_data(ttl=AUTO_REFRESH_SECONDS, show_spinner=False)  # a spinner per load pushes the page down -> visible shaking
 def load_ticket_list(jql):
-    """Key/status/assignee for every ticket a JQL returns (inflow and backlog lists)."""
-    issues = jira_client.search_issues(jql, fields=["assignee", "status"])
+    """Key/status/assignee/severity for every ticket a JQL returns (inflow lists)."""
+    issues = jira_client.search_issues(jql, fields=["summary", "assignee", "status", config.SEVERITY_FIELD])
     rows = [
         {
             "Key": issue["key"],
+            "Summary": issue["fields"].get("summary", ""),
             "Status": (issue["fields"].get("status") or {}).get("name", ""),
             "Assignee": (issue["fields"].get("assignee") or {}).get("displayName", "Unassigned"),
+            "Severity": breach_logic._extract_option_value(issue["fields"].get(config.SEVERITY_FIELD)) or "N/A",
         }
         for issue in issues
     ]
-    return pd.DataFrame(rows, columns=["Key", "Status", "Assignee"])
+    return pd.DataFrame(rows, columns=["Key", "Summary", "Status", "Assignee", "Severity"])
 
 
 def created_today(created_raw):
@@ -738,8 +800,22 @@ def created_today(created_raw):
     return created_dt.date() == datetime.now(created_dt.tzinfo).date()
 
 
+def popup_ticket(row):
+    due = row.get("Due")
+    if due is None and row.get("Due Datetime") is not None:
+        due = breach_logic.format_due_datetime(row.get("Due Datetime"))
+    return {
+        "key": row["Key"],
+        "assignee": row["Assignee"],
+        "severity": row.get("Severity") or "N/A",
+        "status": row.get("Status") or "",
+        "summary": row.get("Summary") or "",
+        "due": due or "",
+    }
+
+
 def tickets_list(df):
-    return [{"key": row["Key"], "assignee": row["Assignee"]} for _, row in df.iterrows()]
+    return [popup_ticket(row) for _, row in df.iterrows()]
 
 
 def open_split(df):
@@ -777,6 +853,11 @@ def mini_stat(value, label, color=TEXT_PRIMARY):
     )
 
 
+def todays_inflow_resolved(df):
+    """Resolved-today tickets that were also created today."""
+    return df[df["Created Today"]] if not df.empty else df
+
+
 def resolved_split(df):
     """Splits today's resolved tickets into those that were also created today
     (today's inflow) and those created on an earlier day (backlog)."""
@@ -785,29 +866,10 @@ def resolved_split(df):
     return tickets_list(df[df["Created Today"]]), tickets_list(df[~df["Created Today"]])
 
 
-def resolved_breach_timing(due_dt):
-    """Classifies a breached resolved ticket as having missed its SLA due date
-    today or on an earlier day, same day-boundary rule as the open-ticket
-    Breached (Past)/Breached Today buckets."""
-    if due_dt is None:
-        return BUCKET_BREACHED_TODAY
-    jira_tz = due_dt.tzinfo
-    if due_dt.date() < datetime.now(jira_tz).date():
-        return BUCKET_BREACHED_PAST
-    return BUCKET_BREACHED_TODAY
-
-
 def resolved_tickets_by_status(df, status):
     if df.empty:
         return []
-    matched = df[df["Resolved Status"] == status]
-    tickets = []
-    for _, row in matched.iterrows():
-        ticket = {"key": row["Key"], "assignee": row["Assignee"]}
-        if status == breach_logic.STATUS_BREACHED:
-            ticket["timing"] = resolved_breach_timing(row["Due Datetime"])
-        tickets.append(ticket)
-    return tickets
+    return tickets_list(df[df["Resolved Status"] == status])
 
 
 def compute_resolved_counts(df):
@@ -867,7 +929,9 @@ for category, cat_config in config.CATEGORIES.items():
         inflow_errors[category] = exc
     if "backlog_jql" in cat_config:
         try:
-            backlog_data[category] = load_ticket_list(cat_config["backlog_jql"])
+            # Full ticket rows (severity, due, breach status), so the backlog
+            # can be bucketed in Time to Resolve like the team's other tickets.
+            backlog_data[category] = load_category_data(category, {**cat_config, "jql": cat_config["backlog_jql"]})
         except Exception as exc:
             backlog_errors[category] = exc
 
@@ -923,20 +987,24 @@ ok_categories = {c: df for c, df in category_data.items() if c not in category_e
 # ---------------------------------------------------------------------------
 # Header: title, overall resolved/SLA summary, refresh button
 # ---------------------------------------------------------------------------
-overall_within_sla = 0
-overall_breached = 0
+# Today SLA is judged only on tickets created today and resolved today;
+# tickets resolved from past inflow are counted separately.
+today_within_sla = 0
+today_breached = 0
+resolved_today_inflow_count = 0
+resolved_past_inflow_count = 0
 for category, df in resolved_data.items():
     if category in resolved_errors:
         continue
-    counts = compute_resolved_counts(df)
-    overall_within_sla += counts["within_sla"]
-    overall_breached += counts["breached"]
-overall_total_resolved = overall_within_sla + overall_breached
-overall_pct = round(overall_within_sla / overall_total_resolved * 100, 1) if overall_total_resolved else None
-overall_pct_display = "—" if overall_pct is None else f"{overall_pct:.0f}%"
-# Every resolved ticket, including any whose SLA couldn't be judged (no severity),
-# so it equals the sum of the teams' "Total resolved" rows.
-overall_resolved_count = sum(len(df) for c, df in resolved_data.items() if c not in resolved_errors)
+    today_df = todays_inflow_resolved(df)
+    counts = compute_resolved_counts(today_df)
+    today_within_sla += counts["within_sla"]
+    today_breached += counts["breached"]
+    resolved_today_inflow_count += len(today_df)
+    resolved_past_inflow_count += len(df) - len(today_df)
+today_judged = today_within_sla + today_breached
+today_pct = round(today_within_sla / today_judged * 100, 1) if today_judged else None
+today_pct_display = "—" if today_pct is None else f"{today_pct:.0f}%"
 
 # Team scopes can overlap (e.g. SAC covers every non-Retail SAC ticket), so
 # the overall inflow counts each ticket once rather than summing the teams.
@@ -945,7 +1013,7 @@ for category, df in inflow_data.items():
     overall_inflow_keys.update(df["Key"])
 overall_inflow_display = "—" if inflow_errors and not inflow_data else len(overall_inflow_keys)
 
-header_col1, header_col2, header_col3 = st.columns([3.6, 2.8, 1.3])
+header_col1, header_col2, header_col3 = st.columns([2.5, 3.9, 1.3])
 with header_col1:
     st.markdown(
         '<div class="app-header"><div class="app-logo">'
@@ -965,11 +1033,17 @@ with header_col2:
         f'<div class="overall-stat-value">{overall_inflow_display}</div>'
         '<div class="overall-stat-label">Inflow Today</div></div>'
         '<div class="overall-divider"></div>'
-        f'<div class="overall-stat"><div class="overall-stat-value">{overall_resolved_count}</div>'
-        '<div class="overall-stat-label">Resolved Today</div></div>'
+        '<div class="overall-stat" title="Tickets created before today and resolved today">'
+        f'<div class="overall-stat-value">{resolved_past_inflow_count}</div>'
+        '<div class="overall-stat-label">Resolved from Past Inflow</div></div>'
         '<div class="overall-divider"></div>'
-        f'<div class="overall-stat"><div class="overall-stat-value" style="color:{sla_pct_color(overall_pct)};">'
-        f'{overall_pct_display}</div><div class="overall-stat-label">Overall SLA</div></div>'
+        '<div class="overall-stat" title="Tickets created today and already resolved">'
+        f'<div class="overall-stat-value">{resolved_today_inflow_count}</div>'
+        '<div class="overall-stat-label">Resolved from Today Inflow</div></div>'
+        '<div class="overall-divider"></div>'
+        '<div class="overall-stat" title="Within SLA / (Within SLA + Breached), for tickets created and resolved today">'
+        f'<div class="overall-stat-value" style="color:{sla_pct_color(today_pct)};">{today_pct_display}</div>'
+        '<div class="overall-stat-label">Today SLA</div></div>'
         '</div>',
         unsafe_allow_html=True,
     )
@@ -1027,7 +1101,7 @@ with open_section:
         )
 
 with resolved_section:
-    st.markdown('<div class="section-title">Total Resolved Tickets &mdash; Today</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Total Resolved Tickets &mdash; Today\'s Inflow</div>', unsafe_allow_html=True)
     cols = st.columns(len(config.CATEGORIES))
     for col, category in zip(cols, config.CATEGORIES.keys()):
         if category in resolved_errors:
@@ -1038,27 +1112,43 @@ with resolved_section:
             )
             continue
 
-        counts = compute_resolved_counts(resolved_data[category])
+        # The card is about today's inflow: tickets created today and resolved
+        # today. Past-inflow resolutions are shown once, at the bottom.
+        from_inflow, from_backlog = resolved_split(resolved_data[category])
+        today_df = todays_inflow_resolved(resolved_data[category])
+        counts = compute_resolved_counts(today_df)
         pct_display = "—" if counts["pct"] is None else f'{counts["pct"]:.0f}%'
-        breached_tickets = resolved_tickets_by_status(resolved_data[category], breach_logic.STATUS_BREACHED)
         rows_html = (
-            f'<div class="mini-stats">{mini_stat(len(resolved_data[category]), "Total resolved")}'
-            f'<div class="mini-stat-divider"></div>'
-            f'{mini_stat(pct_display, "SLA met", sla_pct_color(counts["pct"]))}</div>'
-            f'<div class="bucket-row"><span class="label">'
-            f'<span class="dot" style="background:{COLOR_GOOD};"></span>Within SLA</span>'
-            f'<span class="value">{counts["within_sla"]}</span></div>'
+            '<div class="mini-stats">'
+            + popup_row(
+                f'<div class="mini-stat-value">{len(from_inflow)}</div>'
+                f'<div class="mini-stat-label">Resolved</div>',
+                bucket_popup_html(from_inflow),
+                f"{category} — Resolved from today's inflow",
+                row_class="mini-stat",
+            )
+            + '<div class="mini-stat-divider"></div>'
+            + mini_stat(pct_display, "Today SLA", sla_pct_color(counts["pct"]))
+            + '</div>'
+            + popup_row(
+                f'<span class="label"><span class="dot" style="background:{COLOR_GOOD};"></span>Within SLA</span>'
+                f'<span class="value">{counts["within_sla"]}</span>',
+                bucket_popup_html(resolved_tickets_by_status(today_df, breach_logic.STATUS_OK)),
+                f"{category} — Within SLA (today's inflow)",
+            )
             + popup_row(
                 f'<span class="label"><span class="dot" style="background:{COLOR_CRITICAL};"></span>Breached</span>'
                 f'<span class="value">{counts["breached"]}</span>',
-                resolved_breach_popup_html(breached_tickets),
-                f"{category} — Breached",
+                bucket_popup_html(resolved_tickets_by_status(today_df, breach_logic.STATUS_BREACHED)),
+                f"{category} — Breached (today's inflow)",
             )
-        )
-        from_inflow, from_backlog = resolved_split(resolved_data[category])
-        rows_html += (
-            '<div class="bucket-subcaption">Resolved from</div>'
-            + split_rows(category, "Resolved", from_inflow, from_backlog)
+            + '<div class="bucket-subcaption">Also resolved today</div>'
+            + popup_row(
+                f'<span class="label"><span class="dot" style="background:{COLOR_BACKLOG};"></span>Past inflow</span>'
+                f'<span class="value">{len(from_backlog)}</span>',
+                bucket_popup_html(from_backlog),
+                f"{category} — Resolved from past inflow",
+            )
         )
         col.markdown(
             f'<div class="bucket-card summary-card"><div class="bucket-card-head">{category}</div>{rows_html}</div>',
@@ -1079,7 +1169,12 @@ for col, category in zip(cols, config.CATEGORIES.keys()):
         )
         continue
 
-    buckets = compute_time_buckets(category_data[category])
+    open_df = category_data[category]
+    if category in backlog_data:
+        # This team's open query only covers today's tickets; add its backlog
+        # (older open tickets) so past breaches show up here too.
+        open_df = pd.concat([open_df, backlog_data[category]], ignore_index=True)
+    buckets = compute_time_buckets(open_df)
     rows_html = "".join(
         popup_row(
             f'<span class="label"><span class="dot" style="background:{BUCKET_COLOR[b]};"></span>{b}</span>'
