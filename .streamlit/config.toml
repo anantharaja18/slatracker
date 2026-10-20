@@ -8,3 +8,8 @@ font = "sans serif"
 
 [server]
 headless = true
+
+[client]
+# pages/ (Ticket Trend Analysis) is opened from the dashboard's own button,
+# so Streamlit's sidebar page list is hidden.
+showSidebarNavigation = false

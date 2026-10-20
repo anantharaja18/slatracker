@@ -183,3 +183,39 @@ CATEGORIES = {
         "warn_hours": 1,
     },
 }
+
+# ---------------------------------------------------------------------------
+# Ticket Trend Analysis (pages/Ticket_Trend_Analysis.py, trend_store.py)
+# ---------------------------------------------------------------------------
+TREND_HISTORY_DAYS = 183      # ~6 months of tickets kept in the local cache
+TREND_SYNC_MINUTES = 10       # how often `python trend_store.py --loop` re-syncs
+TREND_STALE_MINUTES = 15      # the page itself syncs if the cache is older than this
+TREND_TOP_N = 5
+
+TREND_FIELDS = {
+    "reporting_area": "customfield_10861",        # Reporting Area
+    "account_type": "customfield_10880",          # Account type (B2B / B2C)
+    "incident_category": "customfield_10867",     # Incident Category
+    "incident_subcategory": "customfield_10868",  # Incident Sub Category -- SAC / B2B driver
+    "of_reason": "customfield_17928",             # Order Fallout Reason
+    "of_step": "customfield_17930",               # Order Fallout Step (failed step)
+    "of_type": "customfield_17929",               # Order Fallout Type
+    "of_error": "customfield_17931",              # Order Fallout Error Description (rich text)
+    "fix_eta": "customfield_16974",               # SAL "Final or Production ETA"
+    "fix_source": "customfield_10052",            # SAL "Source" (e.g. Order Fallout B2C)
+}
+
+# Every SAC-project ticket; each is put in one trend category in
+# trend_analysis._driver_columns(): Order Fallout, then B2B (Account type), then SAC
+# (Retail + SAC scopes above, i.e. non-B2B and not raised by the SAC BOT).
+TREND_TICKET_JQL = "project = SAC"
+
+# SAL (development fixes) and SFS (Salesforce support) tickets to look for
+# fixes in, on top of any SAL / SFS ticket directly linked to a SAC ticket.
+TREND_FIX_JQLS = [
+    'project = SAL AND created >= -365d AND (labels in ("L3.Peacock.B2B", "L3.Peacock.B2C", '
+    '"L3.Peacock.Support[prodapt_dev]", "L3_Peacock_Support_Team", "LCPR.ProdStab.Roadmap", '
+    '"L3.Peacock.ITOpsPriority", "L3.Peacock.RetailOperations", "L3.Peacock.RetailPriority", '
+    '"LCPR_orderfallout_bot") OR Source is not EMPTY)',
+    'project = SFS AND created >= -365d AND "Business Unit by OpCo" = "LCPR-Puerto Rico (Peacock)"',
+]

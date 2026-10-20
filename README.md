@@ -66,6 +66,45 @@ with `Chat.Create` and `ChatMessage.Send` permissions — add those to
 `send_direct_message()` in `teams_notifier.py` using the Graph `/chats`
 endpoint.
 
+## 6. Ticket Trend Analysis
+
+The dashboard's **Ticket Trend Analysis** button opens a second page in a new
+browser tab. It shows:
+
+- **Top 5 drivers** for SAC (Retail + SAC), B2B and Order Fallout over a day
+  (default: today), a Sunday-to-Saturday week, or a custom date range.
+- **How drivers are grouped.** SAC and B2B use the Incident Sub Category
+  field. Tickets without one get a theme from their summary keywords.
+  Order Fallout uses Failed Step plus Error Description, with order numbers
+  and IDs stripped so that repeats of the same error group together.
+- **Weekly trend** for each category's top drivers, over 4 to 26 weeks.
+- **SAL / SFS tracking per driver.** Each driver lists the SAL tickets
+  (development fixes) and SFS tickets that its tickets link to, plus any
+  whose summary names the same failed step or error. Each fix shows its
+  status and deployment date, or its planned date (fix version, *Final or
+  Production ETA*, or due date).
+- **Alerts:**
+  - *Still occurring after fix*: a fix was deployed (or the SFS resolved),
+    but tickets for the same issue kept arriving after it, at least one in
+    the last 30 days.
+  - *Fix date passed*: the planned date is over and the fix isn't deployed.
+- **Download**: an Excel workbook with four sheets: Top Drivers, Fix
+  Tracking (SAL-SFS), Weekly Trend and Tickets.
+
+The data comes from a local cache, `trend_data/trend_cache.db`, holding about
+6 months of tickets. The first load takes about 3 minutes. After that, only
+tickets updated since the last sync are fetched. To keep the cache live, run
+the sync agent alongside the dashboard:
+
+```bash
+python trend_store.py --loop     # syncs every TREND_SYNC_MINUTES (10)
+python trend_store.py --full     # reload the full 6 months, e.g. after config changes
+```
+
+Without the agent running, the page syncs on its own whenever the cache is
+more than 15 minutes old, and it refreshes every 5 minutes. Settings and
+field IDs are under "Ticket Trend Analysis" in `config.py`.
+
 ## File overview
 
 | File | Purpose |
@@ -77,3 +116,6 @@ endpoint.
 | `state.py` | Dedup tracking so tickets aren't re-alerted every cycle |
 | `checker.py` | Scheduled script — detection + Teams alerts |
 | `dashboard.py` | Streamlit live dashboard UI |
+| `pages/Ticket_Trend_Analysis.py` | Ticket Trend Analysis page (opened from the dashboard) |
+| `trend_store.py` | Jira -> local SQLite cache for the trend page; `--loop` = sync agent |
+| `trend_analysis.py` | Driver grouping, top drivers, weekly trends, SAL / SFS fix matching and alerts |

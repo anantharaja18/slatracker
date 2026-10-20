@@ -556,6 +556,12 @@ st.markdown(
         .app-title {{ font-size: 1.15rem; font-weight: 700; color: {TEXT_PRIMARY}; line-height: 1.1; }}
         .app-subtitle {{ font-size: 0.75rem; color: {TEXT_MUTED}; margin-top: 1px; }}
         .app-refreshed {{ font-size: 0.68rem; color: {TEXT_MUTED}; text-align: right; }}
+        a.trend-link {{
+            display: block; text-align: center; padding: 6px 10px; border-radius: 8px;
+            background: linear-gradient(135deg, {ACCENT_FROM}, {ACCENT_TO});
+            color: white !important; font-size: 0.85rem; font-weight: 600; text-decoration: none !important;
+        }}
+        a.trend-link:hover {{ filter: brightness(1.12); }}
         .header-spacer {{ height: 2px; }}
 
         .overall-summary {{
@@ -1115,6 +1121,12 @@ with header_col3:
     if st.button("🔄  Refresh now", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
+    # pages/Ticket_Trend_Analysis.py, opened in its own browser tab.
+    st.markdown(
+        '<a class="trend-link" href="Ticket_Trend_Analysis" target="_blank" rel="noopener">'
+        '📈&nbsp; Ticket Trend Analysis &#8599;</a>',
+        unsafe_allow_html=True,
+    )
     st.markdown(
         f'<div class="app-refreshed">Last refreshed: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
         f' &middot; auto-refreshes every {AUTO_REFRESH_SECONDS // 60} min</div>',

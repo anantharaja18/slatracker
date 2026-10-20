@@ -16,3 +16,6 @@ notified_state.json
 .claude/
 .venv/
 venv/
+
+# Ticket Trend Analysis cache
+trend_data/
