@@ -1,15 +1,17 @@
 """
 Local cache of Jira tickets for the Ticket Trend Analysis page.
 
-Keeps the last TREND_HISTORY_DAYS of SAC-project tickets plus the SAL / SFS
-fix tickets they may relate to in a SQLite file, so the trend page can
-slice months of data by day / week / custom range without re-querying Jira.
+Keeps the last TREND_HISTORY_DAYS of tickets for each trend category -- each
+category's own JQL in config.TREND_CATEGORY_JQL, with which tickets matched
+it recorded in the `membership` table -- plus the SAL / SFS fix tickets they
+may relate to, in a SQLite file, so the trend page can slice months of data
+by day / week / custom range without re-querying Jira.
 
-    python trend_store.py           # one sync (full 6-month load on first run)
+    python trend_store.py           # one sync (full 1-year load on first run)
     python trend_store.py --loop    # sync agent: keeps the cache live, every
                                     # config.TREND_SYNC_MINUTES
 
-The first run loads ~6 months (~35k tickets, a few minutes); every later run
+The first run loads ~1 year (~75k tickets, about 10 minutes); every later run
 only fetches tickets updated since the previous sync.
 """
 
@@ -19,8 +21,9 @@ import os
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 
+import breach_logic
 import config
 import jira_client
 
@@ -32,7 +35,18 @@ TICKET_FIELDS = [
     config.TREND_FIELDS["incident_category"], config.TREND_FIELDS["incident_subcategory"],
     config.TREND_FIELDS["of_reason"], config.TREND_FIELDS["of_step"],
     config.TREND_FIELDS["of_type"], config.TREND_FIELDS["of_error"], config.SEVERITY_FIELD,
+    config.TREND_FIELDS["sat_issue"], config.TREND_FIELDS["sat_subcategory"],
+    config.TREND_FIELDS["sat_channel"], config.TREND_FIELDS["sat_order_type"],
+    config.TREND_FIELDS["sat_customer_type"],
 ]
+TICKET_COLUMNS = [
+    "key", "created", "created_date", "resolved", "status", "reporter", "reporting_area",
+    "account_type", "inc_cat", "inc_subcat", "of_step", "of_reason", "of_type", "of_error",
+    "severity", "summary", "links", "sat_issue", "sat_subcat", "channel", "order_type", "customer_type",
+]
+# What the cached tickets were loaded with; a change triggers a full reload.
+TICKET_SCOPE = json.dumps({"categories": config.TREND_CATEGORY_JQL, "fields": TICKET_FIELDS,
+                           "history_days": config.TREND_HISTORY_DAYS}, sort_keys=True)
 FIX_FIELDS = [
     "summary", "status", "created", "resolutiondate", "duedate", "fixVersions",
     "issuelinks", "labels", config.TREND_FIELDS["fix_eta"], config.TREND_FIELDS["fix_source"],
@@ -43,7 +57,8 @@ CREATE TABLE IF NOT EXISTS tickets (
     key TEXT PRIMARY KEY, created TEXT, created_date TEXT, resolved TEXT, status TEXT,
     reporter TEXT, reporting_area TEXT, account_type TEXT, inc_cat TEXT, inc_subcat TEXT,
     of_step TEXT, of_reason TEXT, of_type TEXT, of_error TEXT, severity TEXT,
-    summary TEXT, links TEXT
+    summary TEXT, links TEXT, sat_issue TEXT, sat_subcat TEXT, channel TEXT,
+    order_type TEXT, customer_type TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tickets_created ON tickets(created_date);
 CREATE TABLE IF NOT EXISTS fixes (
@@ -51,6 +66,13 @@ CREATE TABLE IF NOT EXISTS fixes (
     created TEXT, resolved TEXT, duedate TEXT, eta TEXT, versions TEXT, links TEXT,
     labels TEXT, source TEXT
 );
+CREATE TABLE IF NOT EXISTS resolved (
+    key TEXT, category TEXT, created TEXT, resolved TEXT, resolved_date TEXT, due TEXT,
+    sla_status TEXT, severity TEXT, priority TEXT, status TEXT, assignee TEXT, summary TEXT,
+    PRIMARY KEY (key, category)
+);
+CREATE INDEX IF NOT EXISTS idx_resolved_date ON resolved(resolved_date);
+CREATE TABLE IF NOT EXISTS membership (key TEXT, category TEXT, PRIMARY KEY (key, category));
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
 """
 
@@ -60,6 +82,11 @@ def connect():
     conn = sqlite3.connect(DB_PATH, timeout=60)
     conn.execute("PRAGMA journal_mode=WAL")  # page reads while the sync agent writes
     conn.executescript(SCHEMA)
+    # Caches created before a column existed get it added (filled on the next reload).
+    have = {row[1] for row in conn.execute("PRAGMA table_info(tickets)")}
+    for col in TICKET_COLUMNS:
+        if col not in have:
+            conn.execute(f"ALTER TABLE tickets ADD COLUMN {col} TEXT")
     return conn
 
 
@@ -126,6 +153,11 @@ def ticket_row(issue):
         _option(f.get(config.SEVERITY_FIELD)),
         f.get("summary") or "",
         json.dumps(_link_keys(f)),
+        _option(f.get(tf["sat_issue"])).strip(),
+        _option(f.get(tf["sat_subcategory"])).strip(),
+        _option(f.get(tf["sat_channel"])),
+        _option(f.get(tf["sat_order_type"])),
+        _option(f.get(tf["sat_customer_type"])),
     )
 
 
@@ -147,8 +179,10 @@ def fix_row(issue):
 
 
 def _upsert_tickets(conn, issues):
-    conn.executemany("INSERT OR REPLACE INTO tickets VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                     [ticket_row(i) for i in issues])
+    conn.executemany(
+        f"INSERT OR REPLACE INTO tickets ({', '.join(TICKET_COLUMNS)}) "
+        f"VALUES ({', '.join('?' * len(TICKET_COLUMNS))})",
+        [ticket_row(i) for i in issues])
 
 
 def _upsert_fixes(conn, issues):
@@ -169,24 +203,127 @@ def _weekly_windows(start, end):
     return windows
 
 
-def _full_ticket_load(conn, progress=None):
-    """Loads TREND_HISTORY_DAYS of tickets in weekly slices, several at a time."""
-    start = date.today() - timedelta(days=config.TREND_HISTORY_DAYS)
-    windows = _weekly_windows(start, date.today())
+# ---------------------------------------------------------------------------
+# Resolved tickets (Resolved History page): the dashboard teams' resolved
+# scopes, with SLA judged exactly like the dashboard's resolved cards.
+# ---------------------------------------------------------------------------
+RESOLVED_FIELDS = ["summary", "status", "assignee", "priority", "created", "resolutiondate", config.SEVERITY_FIELD]
+RESOLVED_SCOPE = json.dumps({
+    "categories": {c: cfg["resolved_scope_jql"] for c, cfg in config.CATEGORIES.items()},
+    "sla": config.SLA_MINUTES, "fields": RESOLVED_FIELDS, "history_days": config.TREND_HISTORY_DAYS,
+}, sort_keys=True)
 
-    def fetch(window):
-        a, b = window
-        jql = f'{config.TREND_TICKET_JQL} AND created >= "{a:%Y-%m-%d}" AND created < "{b:%Y-%m-%d}"'
-        return jira_client.search_issues(jql, fields=TICKET_FIELDS)
 
+def resolved_row(issue, category):
+    f = issue["fields"]
+    result = breach_logic.evaluate_resolution(issue, config.CATEGORIES[category])
+    resolved = f.get("resolutiondate") or ""
+    return (
+        issue["key"], category, f.get("created") or "", resolved,
+        resolved[:10],  # resolved day in the timezone Jira reported it in
+        result["due_date"].isoformat() if result["due_date"] else "",
+        result["status"], result["severity"] or "N/A",
+        (f.get("priority") or {}).get("name", ""), (f.get("status") or {}).get("name", ""),
+        (f.get("assignee") or {}).get("displayName", "Unassigned"), f.get("summary") or "",
+    )
+
+
+def _resolved_jql(category, extra):
+    return f'({config.CATEGORIES[category]["resolved_scope_jql"]}) AND {extra}'
+
+
+def _full_resolved_load(conn, progress=None):
+    """TREND_HISTORY_DAYS of resolved tickets per dashboard team, in weekly
+    slices of resolution date; swapped in at the end like membership."""
+    start = breach_logic.jira_now().date() - timedelta(days=config.TREND_HISTORY_DAYS)
+    tasks = [(cat, w) for cat in config.CATEGORIES for w in _weekly_windows(start, breach_logic.jira_now().date())]
+
+    def fetch(task):
+        cat, (a, b) = task
+        jql = _resolved_jql(cat, f'resolutiondate >= "{a:%Y-%m-%d}" AND resolutiondate < "{b:%Y-%m-%d}"')
+        return cat, jira_client.search_issues(jql, fields=RESOLVED_FIELDS)
+
+    conn.execute("DROP TABLE IF EXISTS resolved_new")
+    conn.execute("CREATE TABLE resolved_new AS SELECT * FROM resolved WHERE 0")
     done = 0
     with ThreadPoolExecutor(max_workers=6) as pool:
-        for issues in pool.map(fetch, windows):
-            _upsert_tickets(conn, issues)
+        for cat, issues in pool.map(fetch, tasks):
+            conn.executemany("INSERT OR REPLACE INTO resolved_new VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                             [resolved_row(i, cat) for i in issues])
             conn.commit()
             done += 1
             if progress:
-                progress(done / len(windows), f"Loaded {done}/{len(windows)} weeks of tickets")
+                progress(done / len(tasks), f"Loaded {done}/{len(tasks)} weekly slices of resolved tickets")
+    conn.execute("DELETE FROM resolved")
+    conn.execute("INSERT INTO resolved SELECT * FROM resolved_new")
+    conn.execute("DROP TABLE resolved_new")
+    conn.commit()
+
+
+def _incremental_resolved_load(conn, clause, changed):
+    """Re-checks every ticket changed since the last sync: still-resolved ones
+    are refreshed, reopened ones drop out of the resolved history."""
+    conn.executemany("DELETE FROM resolved WHERE key = ?", [(k,) for k in changed])
+    for cat in config.CATEGORIES:
+        issues = jira_client.search_issues(_resolved_jql(cat, clause), fields=RESOLVED_FIELDS)
+        conn.executemany("INSERT OR REPLACE INTO resolved VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                         [resolved_row(i, cat) for i in issues])
+    conn.commit()
+
+
+def _category_jql(category, extra):
+    return f"({config.TREND_CATEGORY_JQL[category]}) AND {extra}"
+
+
+def _full_ticket_load(conn, progress=None):
+    """Loads TREND_HISTORY_DAYS of tickets for every category, in weekly slices
+    run several at a time. Membership is rebuilt in a side table and swapped
+    in at the end, so the page keeps showing the old data while this runs."""
+    start = breach_logic.jira_now().date() - timedelta(days=config.TREND_HISTORY_DAYS)
+    tasks = [(cat, w) for cat in config.TREND_CATEGORY_JQL for w in _weekly_windows(start, breach_logic.jira_now().date())]
+
+    def fetch(task):
+        cat, (a, b) = task
+        jql = _category_jql(cat, f'created >= "{a:%Y-%m-%d}" AND created < "{b:%Y-%m-%d}"')
+        return cat, jira_client.search_issues(jql, fields=TICKET_FIELDS)
+
+    conn.execute("DROP TABLE IF EXISTS membership_new")
+    conn.execute("CREATE TABLE membership_new (key TEXT, category TEXT, PRIMARY KEY (key, category))")
+    done = 0
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        for cat, issues in pool.map(fetch, tasks):
+            _upsert_tickets(conn, issues)
+            conn.executemany("INSERT OR IGNORE INTO membership_new VALUES (?, ?)", [(i["key"], cat) for i in issues])
+            conn.commit()
+            done += 1
+            if progress:
+                progress(done / len(tasks), f"Loaded {done}/{len(tasks)} weekly slices of tickets")
+    conn.execute("DELETE FROM membership")
+    conn.execute("INSERT INTO membership SELECT key, category FROM membership_new")
+    conn.execute("DROP TABLE membership_new")
+    conn.commit()
+
+
+def _changed_keys(clause):
+    """Every SAC / SAT ticket updated in the window (Retail's project 10145 is SAC)."""
+    return {i["key"] for i in jira_client.search_issues(config.TREND_TICKET_JQL + " AND " + clause, fields=["created"])}
+
+
+def _incremental_ticket_load(conn, clause):
+    """Tickets updated since the last sync: refreshes their fields and which
+    categories they now match (a ticket can leave one, e.g. when cancelled)."""
+    changed = _changed_keys(clause)
+    matched = {}
+    for cat in config.TREND_CATEGORY_JQL:
+        issues = jira_client.search_issues(_category_jql(cat, clause), fields=TICKET_FIELDS)
+        _upsert_tickets(conn, issues)
+        matched[cat] = {i["key"] for i in issues}
+        changed |= matched[cat]
+    for cat, keys in matched.items():
+        conn.executemany("DELETE FROM membership WHERE key = ? AND category = ?", [(k, cat) for k in changed])
+        conn.executemany("INSERT OR IGNORE INTO membership VALUES (?, ?)", [(k, cat) for k in keys])
+    conn.commit()
+    return changed
 
 
 def _fetch_by_keys(keys):
@@ -226,32 +363,88 @@ def _sync_fixes(conn, updated_clause):
         conn.commit()
 
 
+# One sync at a time across every process (the sync agent, each dashboard
+# server and the command line): overlapping full reloads overwrite each
+# other's staging tables. A lock older than this is from a crashed run.
+LOCK_PATH = os.path.join(os.path.dirname(DB_PATH), "sync.lock")
+LOCK_STALE_MINUTES = 90
+
+
+def _acquire_lock():
+    os.makedirs(os.path.dirname(LOCK_PATH), exist_ok=True)
+    for _ in range(2):
+        try:
+            fd = os.open(LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, f"pid {os.getpid()} at {datetime.now().isoformat(timespec='seconds')}".encode())
+            os.close(fd)
+            return True
+        except FileExistsError:
+            age = time.time() - os.path.getmtime(LOCK_PATH)
+            if age < LOCK_STALE_MINUTES * 60:
+                return False
+            os.remove(LOCK_PATH)  # left behind by a crashed run
+    return False
+
+
+def sync_running():
+    return os.path.exists(LOCK_PATH)
+
+
 def sync(progress=None, force_full=False):
-    """Brings the cache up to date. Returns a short status string."""
+    """Brings the cache up to date, unless another process is already
+    syncing. Returns a short status string."""
+    if not _acquire_lock():
+        return "skipped: another sync is already running"
+    try:
+        return _sync(progress, force_full)
+    finally:
+        os.remove(LOCK_PATH)
+
+
+def _sync(progress, force_full):
     started = datetime.now()
     conn = connect()
     try:
         last_sync = get_meta(conn, "last_sync")
-        if force_full or not last_sync:
+        if force_full or not last_sync or get_meta(conn, "ticket_scope") != TICKET_SCOPE:
             _full_ticket_load(conn, progress)
+            _full_resolved_load(conn, progress)
             if progress:
                 progress(1.0, "Loading SAL / SFS fix tickets")
             _sync_fixes(conn, "")
             mode = "full"
         else:
             minutes = int((started - datetime.fromisoformat(last_sync)).total_seconds() // 60) + 15
-            clause = f" AND updated >= -{minutes}m"
-            issues = jira_client.search_issues(config.TREND_TICKET_JQL + clause, fields=TICKET_FIELDS)
-            _upsert_tickets(conn, issues)
-            conn.commit()
-            _sync_fixes(conn, clause)
-            mode = f"incremental ({len(issues)} tickets updated)"
+            clause = f"updated >= -{minutes}m"
+            changed = _incremental_ticket_load(conn, clause)
+            if get_meta(conn, "resolved_scope") == RESOLVED_SCOPE:
+                _incremental_resolved_load(conn, clause, changed)
+            else:
+                _full_resolved_load(conn, progress)
+            _sync_fixes(conn, " AND " + clause)
+            mode = f"incremental ({len(changed)} tickets updated)"
 
-        cutoff = (date.today() - timedelta(days=config.TREND_HISTORY_DAYS + 7)).isoformat()
-        conn.execute("DELETE FROM tickets WHERE created_date < ?", (cutoff,))
+        cutoff = (breach_logic.jira_now().date() - timedelta(days=config.TREND_HISTORY_DAYS + 7)).isoformat()
+        conn.execute("DELETE FROM tickets WHERE created_date < ? OR key NOT IN (SELECT key FROM membership)", (cutoff,))
+        conn.execute("DELETE FROM membership WHERE key NOT IN (SELECT key FROM tickets)")
+        conn.execute("DELETE FROM resolved WHERE resolved_date < ?", (cutoff,))
         set_meta(conn, "last_sync", started.isoformat(timespec="seconds"))
+        set_meta(conn, "ticket_scope", TICKET_SCOPE)
+        set_meta(conn, "resolved_scope", RESOLVED_SCOPE)
         conn.commit()
         return f"{mode} sync finished at {datetime.now():%Y-%m-%d %H:%M:%S}"
+    finally:
+        conn.close()
+
+
+def needs_full_reload():
+    """True when the cache was loaded with a different ticket scope / field list."""
+    if not os.path.exists(DB_PATH):
+        return True
+    conn = connect()
+    try:
+        return (get_meta(conn, "ticket_scope") != TICKET_SCOPE
+                or get_meta(conn, "resolved_scope") != RESOLVED_SCOPE)
     finally:
         conn.close()
 

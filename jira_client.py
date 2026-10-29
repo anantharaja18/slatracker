@@ -2,6 +2,8 @@
 Thin wrapper around the Jira Cloud REST API for running JQL searches.
 """
 
+import time
+
 import requests
 import truststore
 from requests.auth import HTTPBasicAuth
@@ -16,6 +18,26 @@ truststore.inject_into_ssl()
 
 def _auth():
     return HTTPBasicAuth(config.JIRA_EMAIL, config.JIRA_API_TOKEN)
+
+
+# Timeouts, dropped connections, rate limits (429) and Jira 5xx errors are
+# usually transient: retry them a few times with a growing pause.
+RETRY_STATUS = {429, 500, 502, 503, 504}
+RETRY_WAITS = [2, 5, 15, 30]
+
+
+def _post_with_retry(url, payload):
+    for attempt, wait in enumerate([*RETRY_WAITS, None]):
+        try:
+            resp = requests.post(url, json=payload, auth=_auth(), timeout=60)
+            if resp.status_code not in RETRY_STATUS or wait is None:
+                resp.raise_for_status()
+                return resp.json()
+            wait = max(wait, int(resp.headers.get("Retry-After", 0) or 0))
+        except (requests.ConnectionError, requests.Timeout):
+            if wait is None:
+                raise
+        time.sleep(wait)
 
 
 def search_issues(jql: str, fields=None, max_results: int = 100):
@@ -44,9 +66,7 @@ def search_issues(jql: str, fields=None, max_results: int = 100):
         if next_page_token:
             payload["nextPageToken"] = next_page_token
 
-        resp = requests.post(url, json=payload, auth=_auth(), timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
+        data = _post_with_retry(url, payload)
 
         issues.extend(data.get("issues", []))
         next_page_token = data.get("nextPageToken")

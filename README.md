@@ -66,16 +66,26 @@ with `Chat.Create` and `ChatMessage.Send` permissions — add those to
 `send_direct_message()` in `teams_notifier.py` using the Graph `/chats`
 endpoint.
 
+Cancelled tickets (status Canceled or Cancelled) are excluded everywhere:
+open, inflow, backlog and resolved counts on the dashboard; both history
+pages; and the SAL / SFS fixes matched to drivers.
+
 ## 6. Ticket Trend Analysis
 
 The dashboard's **Ticket Trend Analysis** button opens a second page in a new
 browser tab. It shows:
 
-- **Top 5 drivers** for SAC (Retail + SAC), B2B and Order Fallout over a day
-  (default: today), a Sunday-to-Saturday week, or a custom date range.
+- **Top 5 drivers** for SAC, B2B, Order Fallout and SAT (Sales Assurance
+  Team) over a day (default: today), a Sunday-to-Saturday week, or a custom
+  date range. Each category is exactly the JQL in `TREND_CATEGORY_JQL` in
+  `config.py`; a ticket matching several (e.g. a B2B order fallout) counts
+  in each.
 - **How drivers are grouped.** SAC and B2B use the Incident Sub Category
   field. Tickets without one get a theme from their summary keywords.
-  Order Fallout uses Failed Step plus Error Description, with order numbers
+  SAT uses Issue Sub-Category, and its summaries add the issue identified by
+  the SAT agent, the channel, order type and customer type.
+  Order fallout tickets (raised by the SAC BOT) use Failed Step plus Error
+  Description in whichever category they count, with order numbers
   and IDs stripped so that repeats of the same error group together.
 - **Weekly trend** for each category's top drivers, over 4 to 26 weeks.
 - **SAL / SFS tracking per driver.** Each driver lists the SAL tickets
@@ -92,18 +102,38 @@ browser tab. It shows:
   Tracking (SAL-SFS), Weekly Trend and Tickets.
 
 The data comes from a local cache, `trend_data/trend_cache.db`, holding about
-6 months of tickets. The first load takes about 3 minutes. After that, only
+1 year of tickets (`TREND_HISTORY_DAYS`). The first load takes about 10 minutes. After that, only
 tickets updated since the last sync are fetched. To keep the cache live, run
 the sync agent alongside the dashboard:
 
 ```bash
 python trend_store.py --loop     # syncs every TREND_SYNC_MINUTES (10)
-python trend_store.py --full     # reload the full 6 months, e.g. after config changes
+python trend_store.py --full     # reload the full year, e.g. after config changes
 ```
 
 Without the agent running, the page syncs on its own whenever the cache is
 more than 15 minutes old, and it refreshes every 5 minutes. Settings and
 field IDs are under "Ticket Trend Analysis" in `config.py`.
+
+## 7. Resolved Tickets History
+
+The dashboard's **Resolved History** button opens a page in a new browser
+tab. It covers Retail, SAC, B2B and Order Fallout over a day (default:
+today), a Sunday-to-Saturday week, or a custom range, using the same
+resolved-ticket queries (`resolved_scope_jql`) and SLA rule as the
+dashboard's resolved cards. It shows:
+
+- **Per-team tiles**: resolved count, SLA % (within SLA ÷ (within SLA +
+  resolved late)), the change against the previous period, tickets created
+  and resolved the same day, and the median time to resolve.
+- **Trend** per day or per week: resolved tickets per team, each team on
+  its own scale, plus SLA % for all teams.
+- **Resolved by assignee** per team, with SLA totals.
+- **The ticket list**, filterable by team, SLA status and text.
+- **Excel download** with four sheets: Summary, Trend, By Assignee, Tickets.
+
+It reads 1 year of resolved tickets from the same local cache and the same
+sync as the trend page. Reopened tickets drop out at the next sync.
 
 ## File overview
 
@@ -118,4 +148,7 @@ field IDs are under "Ticket Trend Analysis" in `config.py`.
 | `dashboard.py` | Streamlit live dashboard UI |
 | `pages/Ticket_Trend_Analysis.py` | Ticket Trend Analysis page (opened from the dashboard) |
 | `trend_store.py` | Jira -> local SQLite cache for the trend page; `--loop` = sync agent |
+| `pages/Resolved_Tickets_History.py` | Resolved Tickets History page (opened from the dashboard) |
+| `resolved_analysis.py` | Resolved history: per-team SLA, trends, by assignee, ticket list |
+| `ui_common.py` | Shared look, period picker, sync trigger and Excel styling for both pages |
 | `trend_analysis.py` | Driver grouping, top drivers, weekly trends, SAL / SFS fix matching and alerts |

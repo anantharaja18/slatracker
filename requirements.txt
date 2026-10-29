@@ -7,3 +7,4 @@ openpyxl>=3.1
 anthropic>=1.8
 streamlit-autorefresh>=1.0
 python-dotenv>=1.0
+tzdata>=2024.1  # timezone database for zoneinfo on Windows

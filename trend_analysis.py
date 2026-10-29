@@ -9,15 +9,19 @@ that were deployed while the issue keeps coming in.
 import json
 import re
 from collections import Counter
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 
 import pandas as pd
 
+import breach_logic
 import config
 import trend_store
 
-CATEGORIES = ["SAC", "B2B", "Order Fallout"]
+CATEGORIES = ["SAC", "B2B", "Order Fallout", "SAT"]
 UNCATEGORISED = "Uncategorised"
+CANCELLED_STATUSES = {"cancelled", "canceled"}
+_years = round(config.TREND_HISTORY_DAYS / 365)
+HISTORY_LABEL = ("year" if _years == 1 else f"{_years} years") if config.TREND_HISTORY_DAYS >= 360     else f"{round(config.TREND_HISTORY_DAYS / 30.4)} months"  # "Seen N times in the last ..."
 
 # SAC / B2B tickets with no usable Incident Sub Category get a theme from their
 # summary (Retail agents rarely fill the category). First matching rule wins.
@@ -43,6 +47,7 @@ UNUSABLE_SUBCATEGORIES = {"", "new category needed", "other", "others", "n/a", "
 
 # Order Fallout errors carry ids, numbers and urls that differ per order;
 # masking them groups the same error together.
+_TIMESTAMP = re.compile(r"\b\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?")
 _URL = re.compile(r"https?://\s*([^/\s']+)[^\s']*")
 _SFID = re.compile(r"\b(?=[A-Za-z0-9]*\d)(?=[A-Za-z0-9]*[A-Za-z])[A-Za-z0-9]{15,18}\b")
 _NUM = re.compile(r"\b\d{5,}\b")
@@ -51,7 +56,8 @@ _SPACE = re.compile(r"\s+")
 
 
 def normalize_error(text):
-    text = _URL.sub(r"\1", text or "")
+    text = _TIMESTAMP.sub("<time>", text or "")
+    text = _URL.sub(r"\1", text)
     text = _SFID.sub("<id>", text)
     text = _NUM.sub("<n>", text)
     text = _JUNK.sub("", text)
@@ -67,64 +73,67 @@ def summary_theme(summary):
     return UNCATEGORISED
 
 
-def _driver_columns(df):
-    """Each ticket's trend category, driver and how the driver was derived.
+FALLOUT_SOURCE = "Failed step + error"
 
-    Category: Order Fallout (Reporting Area), then B2B (Account type), then SAC
-    -- the Retail + SAC dashboard scopes (non-B2B, not raised by the SAC BOT
-    unless Retail). Driver: Order Fallout = failed step + normalised error;
-    SAC / B2B = Incident Sub Category, else a theme from the summary. Every
-    distinct error / summary is normalised once to keep a 6-month load fast."""
-    area = df["reporting_area"].fillna("").str.strip().str.lower()
-    b2b = df["account_type"].fillna("").str.strip().str.upper() == "B2B"
-    category = pd.Series(None, index=df.index, dtype=object)
-    category[(area == "retail") | (df["reporter"] != "SAC BOT")] = "SAC"
-    category[b2b] = "B2B"
-    category[area == "order fallout"] = "Order Fallout"
+
+def _driver_columns(df):
+    """Each (ticket, category) row's driver and how it was derived.
+
+    Order fallout tickets (raised by the SAC BOT with a failed step) = failed
+    step + normalised error, in whichever category they count; SAT = Issue
+    Sub-Category; SAC / B2B = Incident Sub Category; otherwise a theme from
+    the summary. Every distinct error / summary is normalised once to keep a
+    1-year load fast."""
+    is_sat = df["category"] == "SAT"
+    step = df["of_step"].fillna("")
+    is_fallout = (df["category"] == "Order Fallout") | ((df["reporter"] == "SAC BOT") & (step != ""))
 
     errors = df["of_error"].fillna("")
     err_norm = errors.map({e: normalize_error(e) for e in errors.unique()})
-    of_driver = df["of_step"].fillna("").replace("", "(no failed step)") + " | " + err_norm
+    of_driver = step.replace("", "(no failed step)") + " | " + err_norm
 
-    sub = df["inc_subcat"].fillna("").str.strip()
+    sub = df["inc_subcat"].fillna("").str.strip().where(~is_sat, df["sat_subcat"].fillna("").str.strip())
     usable = ~sub.str.lower().isin(UNUSABLE_SUBCATEGORIES)
     summaries = df["summary"].fillna("")
     themes = summaries.map({x: summary_theme(x) for x in summaries.unique()})
 
-    is_of = category == "Order Fallout"
-    driver = of_driver.where(is_of, sub.where(usable, themes))
+    driver = of_driver.where(is_fallout, sub.where(usable, themes))
     source = pd.Series("Summary theme", index=df.index)
     source[usable] = "Incident Sub Category"
-    source[is_of] = "Failed step + error"
-    return category, driver, source
+    source[usable & is_sat] = "Issue Sub-Category"
+    source[is_fallout] = FALLOUT_SOURCE
+    return driver, source
 
 
 def load_tickets():
+    """One row per (ticket, category) the ticket matches in config.TREND_CATEGORY_JQL."""
     conn = trend_store.connect()
     try:
-        df = pd.read_sql_query("SELECT * FROM tickets", conn)
+        df = pd.read_sql_query(
+            "SELECT t.*, m.category FROM tickets t JOIN membership m ON m.key = t.key", conn)
     finally:
         conn.close()
     if df.empty:
         return df
-    df["category"], df["driver"], df["driver_source"] = _driver_columns(df)
-    df = df[df["category"].notna()].copy()
+    df["driver"], df["driver_source"] = _driver_columns(df)
     df["created_date"] = pd.to_datetime(df["created_date"]).dt.date
     df["links"] = df["links"].map(json.loads)
-    area = df["reporting_area"].fillna("").str.lower()
-    df["sub_team"] = df["account_type"].fillna("").replace("", "—")
-    df.loc[df["category"] == "SAC", "sub_team"] = area.map(lambda a: "Retail" if a == "retail" else "SAC")
+    # Breakdown shown in summaries: Reporting Area for SAC / B2B, account type
+    # for Order Fallout, channel for SAT.
+    df["sub_team"] = df["reporting_area"].fillna("")
+    of = df["category"] == "Order Fallout"
+    df.loc[of, "sub_team"] = df.loc[of, "account_type"].fillna("")
+    sat = df["category"] == "SAT"
+    df.loc[sat, "sub_team"] = df.loc[sat, "channel"].fillna("")
+    df["sub_team"] = df["sub_team"].replace("", "—")
     df["is_open"] = df["resolved"].fillna("") == ""
     return df
 
 
-def jira_today(df):
-    """Today in the timezone Jira reports timestamps in (the cache stores
-    created dates in that timezone), not the PC's own date."""
-    if df.empty:
-        return date.today()
-    latest = datetime.fromisoformat(df["created"].max())
-    return datetime.now(latest.tzinfo).date() if latest.tzinfo else date.today()
+def jira_today(df=None):
+    """Today in the Jira timezone (config.JIRA_TIMEZONE), the zone the cache's
+    dates are in -- not the PC's own date. (df is no longer needed.)"""
+    return breach_logic.jira_now().date()
 
 
 def load_fixes():
@@ -133,8 +142,13 @@ def load_fixes():
         df = pd.read_sql_query("SELECT * FROM fixes", conn)
     finally:
         conn.close()
+    # Cancelled fixes are never considered (they also arrive when a ticket links one).
+    df = df[~df["status"].str.strip().str.lower().isin(CANCELLED_STATUSES)].copy()
     for col in ("versions", "links", "labels"):
         df[col] = df[col].map(json.loads) if not df.empty else df[col]
+    # Tokenised once here rather than per driver: the pool is ~14k tickets.
+    df["norm"] = df["summary"].map(_norm)
+    df["tokens"] = df["summary"].map(_tokens)
     return df
 
 
@@ -228,7 +242,7 @@ def driver_summary(df, category, driver, start, end):
     open_n = int(cur["is_open"].sum())
     lines.append(f"{len(cur)} ticket(s) in the period ({split}); {open_n} still open, "
                  f"{len(cur) - open_n} resolved.")
-    if category == "Order Fallout":
+    if driver_source_of(all_t) == FALLOUT_SOURCE:
         reasons = ", ".join(f"{k} ({v})" for k, v in _top_values(cur["of_reason"]))
         types = ", ".join(f"{k} ({v})" for k, v in _top_values(cur["of_type"]))
         if reasons:
@@ -238,6 +252,17 @@ def driver_summary(df, category, driver, start, end):
         raw = _top_values(cur["of_error"], 1)
         if raw:
             lines.append(f"Example error: \"{raw[0][0][:220]}\"")
+    elif category == "SAT":
+        if driver_source_of(all_t) == "Summary theme":
+            lines.append("Grouped by summary keywords (no Issue Sub-Category set on these tickets).")
+        for label, col in (("Issue identified by SAT agent", "sat_issue"), ("Type of order", "order_type"),
+                           ("Customer type", "customer_type")):
+            values = ", ".join(f"{k} ({v})" for k, v in _top_values(cur[col]))
+            if values:
+                lines.append(f"{label}: {values}.")
+        examples = "; ".join(f"\"{s[:90]}\"" for s, _ in _top_values(cur["summary"], 3))
+        if examples:
+            lines.append(f"Common summaries: {examples}.")
     else:
         if driver_source_of(all_t) == "Summary theme":
             lines.append("Grouped by summary keywords (no Incident Sub Category set on these tickets).")
@@ -251,7 +276,7 @@ def driver_summary(df, category, driver, start, end):
     if sev:
         lines.append(f"Severity: {sev}.")
     if pd.notna(first_seen):
-        lines.append(f"Seen {len(all_t)} time(s) in the last 6 months, first on {first_seen:%d %b %Y}.")
+        lines.append(f"Seen {len(all_t)} time(s) in the last {HISTORY_LABEL}, first on {first_seen:%d %b %Y}.")
     return {"text": " ".join(lines), "tickets": cur, "all_tickets": all_t}
 
 
@@ -282,28 +307,30 @@ STRONG_MATCH = 0.8
 RECURRING_LOOKBACK_DAYS = 30
 
 
-def text_match_score(category, driver, fix_summary):
-    """0-1 likelihood that a SAL / SFS summary describes this driver's issue."""
-    fix_norm = _norm(fix_summary)
-    fix_tokens = _tokens(fix_summary)
-    if category == "Order Fallout":
+def driver_matcher(is_fallout, driver):
+    """Returns score(fix_norm, fix_tokens): 0-1 likelihood that a SAL / SFS
+    summary (pre-tokenised in load_fixes) describes this driver's issue."""
+    if is_fallout:
         step, _, err = driver.partition(" | ")
         step_norm = _norm(step)
         err_tokens = _tokens(err.replace("<id>", " ").replace("<n>", " "))
-        err_cov = len(err_tokens & fix_tokens) / len(err_tokens) if err_tokens else 0
-        step_hit = bool(step_norm) and len(step_norm) >= 6 and step_norm in fix_norm
-        err_hit = len(err_tokens) >= 2 and err_cov >= 0.8
-        if step_hit and err_hit:
-            return 1.0
-        if err_hit:
-            return 0.8
-        if step_hit:
-            return 0.6  # same failed step, maybe a different error
-        return 0.0
+        step_ok = len(step_norm) >= 6
+
+        def score(fix_norm, fix_tokens):
+            err_cov = len(err_tokens & fix_tokens) / len(err_tokens) if err_tokens else 0
+            step_hit = step_ok and step_norm in fix_norm
+            err_hit = len(err_tokens) >= 2 and err_cov >= 0.8
+            if step_hit and err_hit:
+                return 1.0
+            if err_hit:
+                return 0.8
+            if step_hit:
+                return 0.6  # same failed step, maybe a different error
+            return 0.0
+        return score
+
     tokens = _tokens(driver)
-    if len(tokens) >= 2 and tokens <= fix_tokens:
-        return 0.5
-    return 0.0
+    return lambda fix_norm, fix_tokens: 0.5 if len(tokens) >= 2 and tokens <= fix_tokens else 0.0
 
 
 def _parse_day(text):
@@ -315,7 +342,7 @@ def _parse_day(text):
 
 def fix_state(fix, today=None):
     """Where a SAL / SFS ticket stands: state, the relevant date and a label."""
-    today = today or date.today()
+    today = today or jira_today()
     status = (fix["status"] or "").strip()
     s = status.lower()
     versions = fix["versions"] or []
@@ -326,13 +353,9 @@ def fix_state(fix, today=None):
 
     if fix["project"] == "SFS":
         if fix["status_cat"] == "done":
-            if s == "cancelled":
-                return {"state": "cancelled", "date": None, "label": "Cancelled"}
             return {"state": "resolved", "date": _parse_day(fix["resolved"]), "label": f"{status}"}
         return {"state": "open", "date": None, "label": f"Open ({status})"}
 
-    if s == "cancelled":
-        return {"state": "cancelled", "date": None, "label": "Cancelled"}
     if s == "waiting for release":
         return {"state": "awaiting_release", "date": planned, "label": "Fix ready, waiting for release"}
     if fix["status_cat"] == "done" and s not in ("po approval", "approved"):
@@ -344,77 +367,108 @@ def fix_state(fix, today=None):
     return {"state": "in_progress", "date": planned, "label": f"In progress ({status})"}
 
 
-def match_fixes(df, fixes, category, driver, period_end, max_per_project=3):
+class FixIndex:
+    """The fix pool as plain Python structures for match_fixes(): a key ->
+    record map and the tokenised summaries as lists (iterating pandas'
+    Arrow-backed columns per driver is slow). Build once per data load."""
+
+    def __init__(self, fixes):
+        records = fixes.to_dict("records")
+        self.by_key = {r["key"]: r for r in records}
+        self.scan = [(r["key"], r["norm"], r["tokens"]) for r in records]
+
+
+fix_index = FixIndex
+
+
+def _latest_done_only(ranked, by_key):
+    """Keeps one fix that is already deployed (SAL) / resolved (SFS) per
+    project: the most recent. Earlier fixes for the same issue would repeat
+    the same "still occurring" alert. A weak "Possibly related" match only
+    counts if there is no closer one. Fixes not yet deployed all stay."""
+    done = {}
+    for r in ranked:
+        if r["state"] in ("deployed", "resolved"):
+            done.setdefault(by_key[r["key"]]["project"], []).append(r)
+    keep = set()
+    for rows in done.values():
+        pool = [r for r in rows if r["match"] != "Possibly related"] or rows
+        keep.add(max(pool, key=lambda r: r["date"] or date.min)["key"])  # ties: best-ranked first
+    return [r for r in ranked if r["state"] not in ("deployed", "resolved") or r["key"] in keep]
+
+
+def match_fixes(df, fixes, category, driver, period_end, max_per_project=3, index=None):
     """SAL / SFS tickets for a driver: directly linked ones first, ranked by how
     many of the driver's tickets link to them (an SFS's own SAL links are
     followed too), then summary-text matches. Each comes with its state and
-    any alert."""
+    any alert. Pass index=fix_index(fixes) when calling this for many drivers."""
     if fixes.empty:
         return []
+    index = index if index is not None else FixIndex(fixes)
+    by_key = index.by_key
     all_t = df[(df["category"] == category) & (df["driver"] == driver)
                & (df["created_date"] <= period_end)]
-    by_key = fixes.set_index("key", drop=False)
+    score_fix = driver_matcher(driver_source_of(all_t) == FALLOUT_SOURCE, driver)
 
     link_counts = Counter(k for links in all_t["links"] for k in links if k.split("-")[0] in ("SAL", "SFS"))
     via_sfs = {}
     for key in list(link_counts):
-        if key.startswith("SFS-") and key in by_key.index:
-            for k in by_key.at[key, "links"]:
+        if key.startswith("SFS-") and key in by_key:
+            for k in by_key[key]["links"]:
                 if k.startswith("SAL-") and k not in link_counts:
                     via_sfs[k] = key
 
     candidates = {}
     for key, n in link_counts.items():
-        if key in by_key.index:
+        if key in by_key:
             candidates[key] = {"match": "Linked", "score": 1.0, "linked_tickets": n, "via": ""}
     for key, sfs in via_sfs.items():
-        if key in by_key.index:
+        if key in by_key:
             candidates[key] = {"match": "Linked", "score": 0.9, "linked_tickets": 0, "via": sfs}
-    for fix in fixes.itertuples(index=False):
-        if fix.key in candidates:
+    for key, norm, tokens in index.scan:
+        if key in candidates:
             continue
-        score = text_match_score(category, driver, fix.summary)
+        score = score_fix(norm, tokens)
         if score >= 0.5:
-            candidates[fix.key] = {"match": "Summary match", "score": round(score, 2), "linked_tickets": 0, "via": ""}
+            match = "Summary match" if score >= STRONG_MATCH else "Possibly related"
+            candidates[key] = {"match": match, "score": round(score, 2), "linked_tickets": 0, "via": ""}
 
-    results = []
-    for key, info in candidates.items():
-        fix = by_key.loc[key]
-        state = fix_state(fix, today=period_end)
-        if state["state"] == "cancelled" and info["match"] != "Linked":
-            continue
-        # Recurrence: a fix whose summary strongly matches describes the whole
-        # driver, so every later driver ticket counts; a fix that is only
-        # linked counts later tickets linked to that same fix (or its SFS).
-        if info["match"] == "Linked" and text_match_score(category, driver, fix["summary"]) < STRONG_MATCH:
-            ref = info["via"] or key
-            related = all_t[all_t["links"].map(lambda links: ref in links)]
-        elif info["match"] == "Linked" or info["score"] >= STRONG_MATCH:
-            related = all_t
-        else:
-            info["match"] = "Possibly related"
-            related = all_t.iloc[0:0]  # too loose a match to call the issue recurring
-        results.append({**info, "key": key, "project": fix["project"], "summary": fix["summary"],
-                        "status": fix["status"], **state, **recurrence_alert(related, state, period_end)})
-    results.sort(key=lambda r: (r["match"] != "Linked", -r["score"], -r["linked_tickets"],
-                                r["state"] == "cancelled", -(r["date"] or date.min).toordinal()))
+    # Rank and cap first; the recurrence check below is the slow part, so it
+    # only runs for the fixes actually shown.
+    ranked = sorted(
+        ({**info, "key": key, **fix_state(by_key[key], today=period_end)} for key, info in candidates.items()),
+        key=lambda r: (r["match"] != "Linked", -r["score"], -r["linked_tickets"], -(r["date"] or date.min).toordinal()))
+    ranked = _latest_done_only(ranked, by_key)
     out, per_project, loose = [], Counter(), Counter()
-    for r in results:
-        if per_project[r["project"]] >= max_per_project:
+    for r in ranked:
+        fix = by_key[r["key"]]
+        if per_project[fix["project"]] >= max_per_project:
             continue
         if r["match"] == "Possibly related":
-            if loose[r["project"]]:  # one weak suggestion per project is enough
+            if loose[fix["project"]]:  # one weak suggestion per project is enough
                 continue
-            loose[r["project"]] += 1
-        out.append(r)
-        per_project[r["project"]] += 1
+            loose[fix["project"]] += 1
+        per_project[fix["project"]] += 1
+        # Recurrence: a fix whose summary strongly matches describes the whole
+        # driver, so every later driver ticket counts; a fix that is only
+        # linked counts later tickets linked to that same fix (or its SFS);
+        # a loose match is never called recurring.
+        if r["match"] == "Linked" and score_fix(fix["norm"], fix["tokens"]) < STRONG_MATCH:
+            ref = r["via"] or r["key"]
+            related = all_t[all_t["links"].map(lambda links: ref in links)]
+        elif r["match"] != "Possibly related":
+            related = all_t
+        else:
+            related = all_t.iloc[0:0]
+        out.append({**r, "project": fix["project"], "summary": fix["summary"], "status": fix["status"],
+                    **recurrence_alert(related, r, period_end)})
     return out
 
 
 def recurrence_alert(related_tickets, state, today=None):
     """Deployed / resolved fix but tickets still arriving after it, or a
     planned date that has passed without deployment."""
-    today = today or date.today()
+    today = today or jira_today()
     if state["state"] in ("deployed", "resolved") and state["date"]:
         after = related_tickets[related_tickets["created_date"] > state["date"]]
         # Only "still occurring" if a post-fix ticket arrived recently.

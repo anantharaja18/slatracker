@@ -22,6 +22,11 @@ JIRA_BASE_URL = os.environ.get("JIRA_BASE_URL", "https://lla.atlassian.net/")
 JIRA_EMAIL = os.environ.get("JIRA_EMAIL", "")
 JIRA_API_TOKEN = os.environ.get("JIRA_API_TOKEN", "")
 
+# Timezone of the Jira profile of the JIRA_EMAIL account. Jira returns every
+# timestamp in it and evaluates startOfDay() in it, so the reports' days and
+# weeks follow it; the "Last refreshed" / "synced" times are shown in it too.
+JIRA_TIMEZONE = os.environ.get("JIRA_TIMEZONE", "America/New_York")
+
 # ---------------------------------------------------------------------------
 # Microsoft Teams
 # ---------------------------------------------------------------------------
@@ -78,6 +83,10 @@ CHECK_INTERVAL_MINUTES = 30
 # sla_minutes    -> {severity value: minutes to resolve, measured from Created}
 # warn_hours     -> how many hours before the deadline counts as
 #                   "About to Breach" (breach itself = deadline has passed)
+# resolved_scope_jql -> every resolved ticket in the team's scope, any date,
+#                  excluding cancelled tickets
+#                  (Resolved History page); the dashboard's "resolved_jql"
+#                  (resolved today) is built from it below
 # inflow_jql     -> every ticket created today in the team's scope, whatever
 #                   its current status ("Inflow Today" on the dashboard)
 # backlog_jql    -> optional: open tickets created before today, for a team
@@ -87,7 +96,7 @@ SEVERITY_FIELD = "customfield_10051"  # "Severity" custom field -- values are "S
 
 # SLA override applied to every category, measured from ticket Created time:
 # Sev-1 = 1 hour, Sev-2 = 4 hours. Jira's own SLA timers are not used.
-SLA_MINUTES = {"Sev-1": 60, "Sev-2": 240}
+SLA_MINUTES = {"Sev-1": 60, "Sev-2": 120}
 
 # B2B tickets are counted only under B2B: Retail and SAC exclude them (keeping
 # tickets with no Account type) so no ticket shows up under two teams.
@@ -99,15 +108,16 @@ CATEGORIES = {
             'AND ("Account type[Dropdown]" != "B2B" OR "Account type[Dropdown]" is EMPTY) '
             'ORDER BY created DESC, status ASC, assignee ASC, "cf[10883]" DESC, key DESC'
         ),
-        "resolved_jql": (
+        "resolved_scope_jql": (
             'project = 10145 AND "Reporting Area[Dropdown]" = Retail '
             'AND ("Account type[Dropdown]" != "B2B" OR "Account type[Dropdown]" is EMPTY) '
-            'AND resolution is not EMPTY AND resolutiondate >= startofday()'
+            'AND resolution is not EMPTY AND status NOT IN (Canceled, Cancelled)'
         ),
         "inflow_jql": (
             'project = 10145 AND "Reporting Area[Dropdown]" = Retail '
             'AND ("Account type[Dropdown]" != "B2B" OR "Account type[Dropdown]" is EMPTY) '
-            'AND created >= startofday()'
+            'AND created >= startofday() '
+            'AND status NOT IN (Canceled, Cancelled)'
         ),
         "breach_type": "sla_from_created",
         "severity_field": SEVERITY_FIELD,
@@ -117,25 +127,27 @@ CATEGORIES = {
     "SAC": {
         "jql": (
             'project = SAC AND created >= startofday() AND "Reporting Area" != Retail '
-            'AND reporter != "SAC BOT" AND resolution is EMPTY AND status != "Waiting for customer" '
+            'AND reporter != "SAC BOT" AND resolution is EMPTY '
+            'AND status NOT IN ("Waiting for customer", Canceled, Cancelled) '
             'AND ("Account type[Dropdown]" != "B2B" OR "Account type[Dropdown]" is EMPTY)'
         ),
-        "resolved_jql": (
+        "resolved_scope_jql": (
             'project = SAC AND "Reporting Area" != Retail AND reporter != "SAC BOT" '
             'AND ("Account type[Dropdown]" != "B2B" OR "Account type[Dropdown]" is EMPTY) '
-            'AND resolution is not EMPTY AND resolutiondate >= startofday()'
+            'AND resolution is not EMPTY AND status NOT IN (Canceled, Cancelled)'
         ),
         "inflow_jql": (
             'project = SAC AND "Reporting Area" != Retail AND reporter != "SAC BOT" '
             'AND ("Account type[Dropdown]" != "B2B" OR "Account type[Dropdown]" is EMPTY) '
-            'AND created >= startofday()'
+            'AND created >= startofday() '
+            'AND status NOT IN (Canceled, Cancelled)'
         ),
         # SAC's "jql" above only covers tickets created today, so its open
         # backlog (created before today, still open) needs its own query.
         "backlog_jql": (
             'project = SAC AND "Reporting Area" != Retail AND reporter != "SAC BOT" '
             'AND ("Account type[Dropdown]" != "B2B" OR "Account type[Dropdown]" is EMPTY) '
-            'AND status NOT IN (Resolved, Closed, "Waiting for customer", Cancelled) '
+            'AND status NOT IN (Resolved, Closed, "Waiting for customer", Canceled, Cancelled) '
             'AND created <= startOfDay()'
         ),
         "breach_type": "sla_from_created",
@@ -147,17 +159,18 @@ CATEGORIES = {
         "jql": (
             'project = SAC AND "Account type[Dropdown]" = "B2B" AND '
             '"Reporting Area[Dropdown]" != "Order Fallout" AND status not in '
-            '(Resolved, Closed, Cancelled, "Waiting for customer") ORDER BY created DESC'
+            '(Resolved, Closed, Canceled, Cancelled, "Waiting for customer") ORDER BY created DESC'
         ),
-        "resolved_jql": (
+        "resolved_scope_jql": (
             'project = SAC AND "Account type[Dropdown]" = "B2B" AND '
             '"Reporting Area[Dropdown]" != "Order Fallout" '
-            'AND resolution is not EMPTY AND resolutiondate >= startofday()'
+            'AND resolution is not EMPTY AND status NOT IN (Canceled, Cancelled)'
         ),
         "inflow_jql": (
             'project = SAC AND "Account type[Dropdown]" = "B2B" AND '
             '"Reporting Area[Dropdown]" != "Order Fallout" '
-            'AND created >= startofday()'
+            'AND created >= startofday() '
+            'AND status NOT IN (Canceled, Cancelled)'
         ),
         "breach_type": "sla_from_created",
         "severity_field": SEVERITY_FIELD,
@@ -169,13 +182,14 @@ CATEGORIES = {
             'project = SAC AND status in ("In Progress", "Waiting for support", Escalated) '
             'AND "Reporting Area[Dropdown]" = "Order fallout"'
         ),
-        "resolved_jql": (
+        "resolved_scope_jql": (
             'project = SAC AND "Reporting Area[Dropdown]" = "Order fallout" '
-            'AND resolution is not EMPTY AND resolutiondate >= startofday()'
+            'AND resolution is not EMPTY AND status NOT IN (Canceled, Cancelled)'
         ),
         "inflow_jql": (
             'project = SAC AND "Reporting Area[Dropdown]" = "Order fallout" '
-            'AND created >= startofday()'
+            'AND created >= startofday() '
+            'AND status NOT IN (Canceled, Cancelled)'
         ),
         "breach_type": "sla_from_created",
         "severity_field": SEVERITY_FIELD,
@@ -184,10 +198,13 @@ CATEGORIES = {
     },
 }
 
+for _cat in CATEGORIES.values():
+    _cat["resolved_jql"] = _cat["resolved_scope_jql"] + " AND resolutiondate >= startofday()"
+
 # ---------------------------------------------------------------------------
 # Ticket Trend Analysis (pages/Ticket_Trend_Analysis.py, trend_store.py)
 # ---------------------------------------------------------------------------
-TREND_HISTORY_DAYS = 183      # ~6 months of tickets kept in the local cache
+TREND_HISTORY_DAYS = 366      # ~1 year of tickets kept in the local cache
 TREND_SYNC_MINUTES = 10       # how often `python trend_store.py --loop` re-syncs
 TREND_STALE_MINUTES = 15      # the page itself syncs if the cache is older than this
 TREND_TOP_N = 5
@@ -201,21 +218,52 @@ TREND_FIELDS = {
     "of_step": "customfield_17930",               # Order Fallout Step (failed step)
     "of_type": "customfield_17929",               # Order Fallout Type
     "of_error": "customfield_17931",              # Order Fallout Error Description (rich text)
+    "sat_issue": "customfield_11683",             # SAT: Issue Identified by SAT Agent (text copy)
+    "sat_subcategory": "customfield_11684",       # SAT: Issue Sub-Category (text copy) -- SAT driver
+    "sat_channel": "customfield_11804",           # SAT: Channel SAT (Retail Store / AR / Kiosk ...)
+    "sat_order_type": "customfield_11671",        # SAT: Type of Order
+    "sat_customer_type": "customfield_11672",     # SAT: Type of customer (Postpaid / Prepaid)
     "fix_eta": "customfield_16974",               # SAL "Final or Production ETA"
     "fix_source": "customfield_10052",            # SAL "Source" (e.g. Order Fallout B2C)
 }
 
-# Every SAC-project ticket; each is put in one trend category in
-# trend_analysis._driver_columns(): Order Fallout, then B2B (Account type), then SAC
-# (Retail + SAC scopes above, i.e. non-B2B and not raised by the SAC BOT).
-TREND_TICKET_JQL = "project = SAC"
+# Trend categories: each is exactly this JQL (the page adds the date range).
+# Cancelled tickets are excluded everywhere in this app.
+# A ticket matching several (e.g. a B2B order fallout) counts in each.
+# Changing any of these (or the fields) makes the next sync reload the full
+# history.
+TREND_CATEGORY_JQL = {
+    "SAC": (
+        'project = SAC AND "Reporting Area" != Retail AND reporter != "SAC BOT" '
+        'AND "Severity" IS NOT EMPTY AND status NOT IN (Canceled, Cancelled)'
+    ),
+    "B2B": 'project = SAC AND "Account type[Dropdown]" = "B2B" AND status NOT IN (Canceled, Cancelled)',
+    "Order Fallout": (
+        'project = SAC AND reporter = "SAC BOT" AND summary !~ "\\"POSSIBLE DUPLICATE\\"" '
+        'AND text ~ "Order Fallout" AND status NOT IN (Canceled, Cancelled)'
+    ),
+    "SAT": (
+        'project = SAT AND labels IS EMPTY '
+        'AND "Issue Sub-Category (copia)" !~ "No Issue Found" '
+        'AND "Issue Sub-Category (copia)" !~ "Seller Didnt Followed Process" '
+        'AND "Issue Sub-Category (copia)" !~ "Waiting for Response" '
+        'AND "Issue Sub-Category (copia)" !~ "Resolution Required" '
+        'AND status NOT IN (Canceled, Cancelled)'
+    ),
+}
+
+# Every project the categories draw from; used to spot tickets that changed
+# since the last sync (so ones that left a category get dropped from it).
+TREND_TICKET_JQL = "project in (SAC, SAT)"
 
 # SAL (development fixes) and SFS (Salesforce support) tickets to look for
 # fixes in, on top of any SAL / SFS ticket directly linked to a SAC ticket.
+# Two years back, so fixes made before the oldest cached ticket still match.
 TREND_FIX_JQLS = [
-    'project = SAL AND created >= -365d AND (labels in ("L3.Peacock.B2B", "L3.Peacock.B2C", '
+    'project = SAL AND created >= -730d AND (labels in ("L3.Peacock.B2B", "L3.Peacock.B2C", '
     '"L3.Peacock.Support[prodapt_dev]", "L3_Peacock_Support_Team", "LCPR.ProdStab.Roadmap", '
     '"L3.Peacock.ITOpsPriority", "L3.Peacock.RetailOperations", "L3.Peacock.RetailPriority", '
-    '"LCPR_orderfallout_bot") OR Source is not EMPTY)',
-    'project = SFS AND created >= -365d AND "Business Unit by OpCo" = "LCPR-Puerto Rico (Peacock)"',
+    '"LCPR_orderfallout_bot") OR Source is not EMPTY) AND status NOT IN (Canceled, Cancelled)',
+    'project = SFS AND created >= -730d AND "Business Unit by OpCo" = "LCPR-Puerto Rico (Peacock)" '
+    'AND status NOT IN (Canceled, Cancelled)',
 ]

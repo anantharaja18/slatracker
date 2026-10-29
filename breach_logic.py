@@ -4,7 +4,11 @@ based on that category's configured breach field and thresholds.
 """
 
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
 from dateutil import parser as date_parser
+
+import config
 
 import jira_client
 
@@ -25,6 +29,24 @@ def _parse_datetime(value):
         return dt
     except (ValueError, TypeError):
         return None
+
+
+JIRA_TZ = ZoneInfo(config.JIRA_TIMEZONE)
+
+
+def jira_now():
+    """Current time in the Jira timezone (not the PC clock's)."""
+    return datetime.now(JIRA_TZ)
+
+
+def to_jira_time(dt):
+    """A PC-local time (naive) or any aware time, in the Jira timezone."""
+    return (dt if dt.tzinfo else dt.astimezone()).astimezone(JIRA_TZ)
+
+
+def jira_time_label():
+    """e.g. "Jira time · America/New_York (EDT)" -- the zone the report uses."""
+    return f"Jira time · {config.JIRA_TIMEZONE} ({jira_now():%Z})"
 
 
 def format_due_datetime(dt):

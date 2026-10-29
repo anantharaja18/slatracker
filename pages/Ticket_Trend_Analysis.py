@@ -1,96 +1,48 @@
 """
-Ticket Trend Analysis: top issue drivers for SAC (Retail + SAC), B2B and
-Order Fallout over a day, a Sunday-Saturday week or a custom range, weekly
-trends, and the SAL / SFS fixes behind each driver.
+Ticket Trend Analysis: top issue drivers for SAC, B2B,
+Order Fallout and SAT (Sales Assurance Team) over a day, a Sunday-Saturday
+week or a custom range, weekly trends, and the SAL / SFS fixes behind each
+driver.
 
 Opened in a new browser tab from the dashboard's "Ticket Trend Analysis"
 button. Data comes from the local cache kept by trend_store.py.
 """
 
 import html
-import io
-import threading
-from datetime import date, datetime, timedelta
+import textwrap
+from datetime import date
 
 import altair as alt
 import pandas as pd
 import streamlit as st
-from openpyxl.styles import Alignment, Font, PatternFill
 from streamlit_autorefresh import st_autorefresh
 
+import breach_logic
 import config
 import trend_analysis as ta
 import trend_store
+import ui_common as ui
+import ui_table
+from ui_common import (COLOR_CRITICAL, COLOR_GOOD, COLOR_WARNING, SURFACE_CARD, SURFACE_PANEL,
+                       TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY, jira_url)
 
-SURFACE_PAGE = "#0d0d14"
-SURFACE_CARD = "#14141c"
-SURFACE_PANEL = "#1a1a24"
-HEADER_BG = "#20202c"
-TEXT_PRIMARY = "#F5F5F7"
-TEXT_SECONDARY = "#C3C2B7"
-TEXT_MUTED = "#898781"
-ACCENT_FROM = "#7C3AED"
-ACCENT_TO = "#DB2777"
-COLOR_GOOD = "#0ca30c"
-COLOR_WARNING = "#fab219"
-COLOR_CRITICAL = "#d03b3b"
-CATEGORY_COLOR = {"SAC": "#d95926", "B2B": "#199e70", "Order Fallout": "#c98500"}
+CATEGORY_COLOR = {"SAC": "#d95926", "B2B": "#199e70", "Order Fallout": "#c98500", "SAT": "#9085e9"}
 # Fixed categorical order (dark-surface steps) for the top-5 driver lines.
 SERIES_COLORS = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181"]
+
+SAMPLE_TICKETS = 5  # latest tickets of each driver shown as references
+EXCEL_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+TOP_N_OPTIONS = {"Top 5": 5, "Top 10": 10, "Top 20": 20}  # drivers ranked per category; default config.TREND_TOP_N
 
 FIX_STATE_COLOR = {
     "deployed": COLOR_GOOD, "resolved": COLOR_GOOD, "awaiting_release": "#3987e5",
     "in_progress": COLOR_WARNING, "not_started": TEXT_MUTED, "open": COLOR_WARNING,
-    "cancelled": "#5b5b56",
 }
 
 st.set_page_config(page_title="Ticket Trend Analysis", page_icon="📈", layout="wide")
 st_autorefresh(interval=5 * 60 * 1000, key="trend_autorefresh")
 
-st.markdown(
-    f"""
-    <style>
-        #MainMenu, footer, header {{visibility: hidden;}}
-        [data-testid="stHeader"], [data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"] {{ display: none; }}
-        [data-testid="stElementContainer"]:has(iframe[title="streamlit_autorefresh.st_autorefresh"]),
-        [data-testid="stElementContainer"]:has(style) {{ display: none; }}
-        [data-testid="stAppViewContainer"] {{
-            background:
-                radial-gradient(circle at 0% 0%, rgba(124,58,237,0.22), transparent 45%),
-                radial-gradient(circle at 100% 0%, rgba(31,111,235,0.18), transparent 45%),
-                {SURFACE_PAGE};
-        }}
-        [data-testid="stMain"] {{ background: transparent; overflow-x: hidden; }}
-        [data-stale="true"] {{ opacity: 1 !important; transition: none !important; }}
-        .block-container, [data-testid="stMainBlockContainer"] {{
-            background: {SURFACE_CARD}; border: 1px solid rgba(255,255,255,0.07); border-radius: 20px;
-            padding: 0.9rem 1.8rem 1.6rem 1.8rem !important; margin-top: 0.6rem; margin-bottom: 0.8rem;
-            max-width: min(1880px, calc(100vw - 2.5rem)); box-shadow: 0 20px 60px rgba(0,0,0,0.45);
-        }}
-        .app-header {{ display: flex; align-items: center; gap: 10px; }}
-        .app-logo {{
-            width: 36px; height: 36px; border-radius: 10px; flex-shrink: 0;
-            background: linear-gradient(135deg, {ACCENT_FROM}, {ACCENT_TO});
-            display: flex; align-items: center; justify-content: center;
-        }}
-        .app-title {{ font-size: 1.15rem; font-weight: 700; color: {TEXT_PRIMARY}; line-height: 1.1; }}
-        .app-subtitle {{ font-size: 0.75rem; color: {TEXT_MUTED}; margin-top: 1px; }}
-        .sync-note {{ font-size: 0.68rem; color: {TEXT_MUTED}; text-align: right; }}
-        .section-title {{
-            font-size: 0.72rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
-            color: {TEXT_SECONDARY}; background: rgba(255,255,255,0.04);
-            border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 7px 14px; margin: 6px 0 2px 0;
-        }}
-        .kpi {{
-            border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; background: {SURFACE_PANEL};
-            padding: 10px 14px; border-top: 3px solid var(--cat);
-        }}
-        .kpi-label {{ font-size: 0.62rem; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: {TEXT_MUTED}; }}
-        .kpi-value {{ font-size: 1.7rem; font-weight: 700; color: {TEXT_PRIMARY}; line-height: 1.15; }}
-        .kpi-sub {{ font-size: 0.72rem; color: {TEXT_SECONDARY}; }}
-        .delta-up {{ color: {COLOR_CRITICAL}; font-weight: 700; }}
-        .delta-down {{ color: {COLOR_GOOD}; font-weight: 700; }}
-        .delta-flat {{ color: {TEXT_MUTED}; font-weight: 700; }}
+ui.apply_css(f"""
         .alert-box {{
             border-radius: 10px; padding: 8px 14px; margin: 4px 0; font-size: 0.82rem; color: {TEXT_PRIMARY};
             border: 1px solid; display: flex; gap: 10px; align-items: baseline;
@@ -121,195 +73,146 @@ st.markdown(
                       padding: 0 6px; border-radius: 999px; }}
         .fix-summary {{ color: {TEXT_MUTED}; flex: 1; min-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
         .fix-none {{ color: {TEXT_MUTED}; font-style: italic; }}
+        .sample-row {{ display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 0.74rem;
+                       color: {TEXT_MUTED}; margin: 0 0 6px 0; }}
+        .sample-key {{
+            padding: 1px 8px; border-radius: 999px; background: rgba(110,168,255,0.12); color: #9cc3ff;
+            font-weight: 600; text-decoration: none; white-space: nowrap;
+        }}
+        .sample-key:hover {{ background: rgba(110,168,255,0.25); color: {TEXT_PRIMARY}; }}
         .fix-alert {{ width: 100%; font-weight: 600; }}
         .fix-alert.recurring {{ color: #ff8a8a; }}
         .fix-alert.overdue {{ color: {COLOR_WARNING}; }}
-        button[data-baseweb="tab"] {{
-            background-color: transparent; border-radius: 999px !important; padding: 6px 20px !important;
-            color: {TEXT_MUTED} !important; margin-right: 4px;
-        }}
-        button[data-baseweb="tab"][aria-selected="true"] {{
-            background: linear-gradient(135deg, {ACCENT_FROM}, {ACCENT_TO}) !important; color: white !important; font-weight: 600;
-        }}
-        div[data-baseweb="tab-list"] {{
-            gap: 2px; border-bottom: none; background: rgba(255,255,255,0.04);
-            border-radius: 999px; padding: 6px; width: fit-content;
-        }}
-        div[data-baseweb="tab-highlight"], div[data-baseweb="tab-border"] {{ display: none; }}
-        div[data-testid="stDataFrame"] {{ border: 1px solid rgba(255,255,255,0.07); border-radius: 10px; overflow: hidden; }}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+""")
 
 
-# ---------------------------------------------------------------------------
-# Data: local cache, kept fresh by `python trend_store.py --loop`; if that
-# agent isn't running, the page syncs itself once the cache is stale.
-# ---------------------------------------------------------------------------
-@st.cache_resource
-def _sync_lock():
-    return threading.Lock()
-
-
-def ensure_fresh(force=False):
-    last = trend_store.last_sync_time()
-    stale = last is None or datetime.now() - last > timedelta(minutes=config.TREND_STALE_MINUTES)
-    if not (force or stale):
-        return None
-    lock = _sync_lock()
-    if not lock.acquire(blocking=False):
-        return None  # another session is syncing
-    try:
-        if last is None:
-            bar = st.progress(0.0, text="First run: loading the last 6 months of tickets from Jira (a few minutes)…")
-            msg = trend_store.sync(lambda f, t: bar.progress(min(f, 1.0), text=t))
-            bar.empty()
-        else:
-            msg = trend_store.sync()
-        return msg
-    except Exception as exc:
-        st.warning(f"Jira sync failed, showing cached data: {exc}")
-        return None
-    finally:
-        lock.release()
-
-
-@st.cache_data(show_spinner="Analysing tickets…")
+# One shared, read-only copy per server, latest sync only: st.cache_data would
+# pickle ~100k rows and hand each visitor a copy (it ran out of memory).
+@st.cache_resource(show_spinner=False, max_entries=1)
 def load_data(sync_stamp):
-    return ta.load_tickets(), ta.load_fixes()
+    fixes = ta.load_fixes()
+    return ta.load_tickets(), fixes, ta.fix_index(fixes)
 
 
-def jira_url(key):
-    return f'{config.JIRA_BASE_URL.rstrip("/")}/browse/{key}'
-
-
-# ---------------------------------------------------------------------------
-# Header
-# ---------------------------------------------------------------------------
-head_l, head_r = st.columns([4, 1.3])
-with head_l:
-    st.markdown(
-        '<div class="app-header"><div class="app-logo">'
-        '<svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="white" stroke-width="2.2" '
-        'stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l6-6 4 4 8-8"/><path d="M15 7h6v6"/></svg>'
-        '</div><div><div class="app-title">Ticket Trend Analysis</div>'
-        '<div class="app-subtitle">Top issue drivers for SAC (Retail + SAC), B2B and Order Fallout, '
-        'with SAL / SFS fix tracking</div></div></div>',
-        unsafe_allow_html=True,
-    )
+head_r = ui.page_header(
+    "Ticket Trend Analysis", "Top issue drivers for SAC, B2B, Order Fallout and SAT, with SAL / SFS fix tracking",
+    '<path d="M3 17l6-6 4 4 8-8"/><path d="M15 7h6v6"/>')
 with head_r:
     force = st.button("🔄  Sync with Jira now", width="stretch")
 
-ensure_fresh(force=force)
+ui.ensure_fresh(force=force)
 last_sync = trend_store.last_sync_time()
 if last_sync is None:
     st.error("No ticket data yet: the Jira sync has not completed. Check the Jira credentials in .env and retry.")
     st.stop()
 
-tickets, fixes = load_data(last_sync.isoformat())
+data_loader = ui.loading_if_new("trend_loaded_sync", last_sync.isoformat(),
+                                "Loading ticket data&hellip; a year of tickets for SAC, B2B, Order Fallout and SAT")
+tickets, fixes, fix_idx = load_data(last_sync.isoformat())
+ui.done_loading(data_loader)
 with head_r:
     st.markdown(
-        f'<div class="sync-note">Jira data synced {last_sync:%Y-%m-%d %H:%M} · '
-        f'{len(tickets):,} tickets since {tickets["created_date"].min():%d %b %Y}</div>',
+        f'<div class="sync-note">Jira data synced {breach_logic.to_jira_time(last_sync):%Y-%m-%d %H:%M %Z} · '
+        f'{len(tickets):,} tickets since {tickets["created_date"].min():%d %b %Y}'
+        f'<br>All dates and times in {html.escape(breach_logic.jira_time_label())}</div>',
         unsafe_allow_html=True,
     )
 
-# ---------------------------------------------------------------------------
-# Period selection
-# ---------------------------------------------------------------------------
 today = ta.jira_today(tickets)  # Jira timezone, not the PC clock
-earliest = today - timedelta(days=config.TREND_HISTORY_DAYS)
-DAY, WEEK, CUSTOM = "Day", "Week (Sun – Sat)", "Custom range"
-
-c_mode, c_pick, c_weeks = st.columns([1.6, 1.6, 1.2])
-with c_mode:
-    mode = st.segmented_control("View", [DAY, WEEK, CUSTOM], default=DAY, key="trend_mode") or DAY
-with c_pick:
-    if mode == DAY:
-        day = st.date_input("Date", value=today, min_value=earliest, max_value=today, format="DD/MM/YYYY")
-        start = end = day
-        period_label = f"{day:%d %b %Y}" + (" (today)" if day == today else "")
-        prev_range = ta.previous_period(start, end)
-        prev_label = "previous day"
-    elif mode == WEEK:
-        weeks_back = [ta.week_start(today) - timedelta(weeks=i) for i in range(config.TREND_HISTORY_DAYS // 7)]
-        start = st.selectbox("Week", weeks_back, format_func=lambda d: ta.week_label(d)
-                             + (" (this week)" if d == ta.week_start(today) else ""))
-        end = min(start + timedelta(days=6), today)
-        period_label = ta.week_label(start)
-        prev_range = ta.previous_period(start, end, week=True)
-        prev_label = ("previous week" if (end - start).days == 6
-                      else f"same days last week ({prev_range[0]:%d %b} – {prev_range[1]:%d %b})")
-    else:
-        picked = st.date_input("Date range", value=(today - timedelta(days=6), today),
-                               min_value=earliest, max_value=today, format="DD/MM/YYYY")
-        start, end = (picked[0], picked[-1]) if isinstance(picked, (tuple, list)) and picked else (today, today)
-        period_label = f"{start:%d %b %Y} – {end:%d %b %Y}"
-        prev_range = ta.previous_period(start, end)
-        prev_label = f"previous {(end - start).days + 1} days"
-with c_weeks:
+period = ui.period_picker(today, key="trend")
+start, end, period_label = period["start"], period["end"], period["label"]
+prev_range, prev_label = period["prev_range"], period["prev_label"]
+with period["extra_col"]:
     trend_weeks = st.slider("Weekly trend: weeks shown", 4, config.TREND_HISTORY_DAYS // 7, 12)
+
+# The Top 5 / 10 / 20 buttons sit in the "Top N drivers" title bar further
+# down, but the overview and alerts above it already depend on the choice,
+# so it is read from the widget's state here (it holds the last click).
+# Clicking the selected button again clears it; keep the last choice instead
+# (set before the widget is created, which Streamlit allows).
+DEFAULT_TOP = f"Top {config.TREND_TOP_N}"
+if not st.session_state.get("trend_top_n"):
+    st.session_state["trend_top_n"] = st.session_state.get("trend_top_n_last", DEFAULT_TOP)
+st.session_state["trend_top_n_last"] = st.session_state["trend_top_n"]
+top_n = TOP_N_OPTIONS[st.session_state["trend_top_n"]]
 
 
 # ---------------------------------------------------------------------------
 # Analysis for the selected period
 # ---------------------------------------------------------------------------
 @st.cache_data(show_spinner=False)
-def analyse(sync_stamp, start, end, prev_range):
+def analyse(sync_stamp, start, end, prev_range, top_n):
     results = {}
     for cat in ta.CATEGORIES:
-        top = ta.top_drivers(tickets, cat, start, end, prev_range)
+        top = ta.top_drivers(tickets, cat, start, end, prev_range, n=top_n)
         for d in top["drivers"]:
             summary = ta.driver_summary(tickets, cat, d["driver"], start, end)
             d["summary"] = summary["text"]
             d["tickets"] = summary["tickets"]
+            d["samples"] = summary["tickets"].head(SAMPLE_TICKETS)[["key", "summary"]].to_dict("records")
             d["first_seen"] = summary["all_tickets"]["created_date"].min()
             d["source"] = ta.driver_source_of(summary["all_tickets"])
-            d["fixes"] = ta.match_fixes(tickets, fixes, cat, d["driver"], end)
+            d["fixes"] = ta.match_fixes(tickets, fixes, cat, d["driver"], end, index=fix_idx)
         results[cat] = top
     return results
 
 
-results = analyse(last_sync.isoformat(), start, end, prev_range)
+# Stays up until the whole page below is drawn (cleared at the end of the script).
+page_loader = ui.loading_if_new(
+    "trend_loaded_view", (last_sync.isoformat(), start, end, prev_range, top_n),
+    f"Analysing the top {top_n} drivers&hellip; matching SAL / SFS fixes and building the charts")
+results = analyse(last_sync.isoformat(), start, end, prev_range, top_n)
 
 
-def delta_html(cur, prev):
-    if prev == 0:
-        return '<span class="delta-flat">new</span>' if cur else '<span class="delta-flat">—</span>'
-    pct = (cur - prev) / prev * 100
-    cls = "delta-up" if pct > 0 else "delta-down" if pct < 0 else "delta-flat"
-    arrow = "▲" if pct > 0 else "▼" if pct < 0 else "■"
-    return f'<span class="{cls}">{arrow} {abs(pct):.0f}%</span>'
+delta_html = ui.delta_html  # more tickets = worse (red)
 
 
 st.markdown(f'<div class="section-title">Overview &mdash; {html.escape(period_label)}</div>', unsafe_allow_html=True)
 kpi_cols = st.columns(len(ta.CATEGORIES))
+def issue_alerts(cat, d):
+    """One alert per issue and kind: the most recent fix carries it, other
+    fixes with the same alert (e.g. the SFS beside a SAL) are named in it."""
+    out = []
+    for kind in ("recurring", "overdue"):
+        hits = sorted((f for f in d["fixes"] if f["alert"] == kind),
+                      key=lambda f: f["date"] or date.min, reverse=True)
+        if hits:
+            out.append((cat, d, hits[0], hits[1:]))
+    return out
+
+
 all_alerts = []
 for col, cat in zip(kpi_cols, ta.CATEGORIES):
     r = results[cat]
-    alerts = [(cat, d, f) for d in r["drivers"] for f in d["fixes"] if f["alert"]]
+    alerts = [a for d in r["drivers"] for a in issue_alerts(cat, d)]
     all_alerts.extend(alerts)
-    recurring = sum(1 for *_, f in alerts if f["alert"] == "recurring")
+    recurring = sum(1 for _, _, f, _ in alerts if f["alert"] == "recurring")
     col.markdown(
         f'<div class="kpi" style="--cat:{CATEGORY_COLOR[cat]};"><div class="kpi-label">{cat} tickets</div>'
         f'<div class="kpi-value">{r["total"]:,}</div>'
         f'<div class="kpi-sub">{delta_html(r["total"], r["prev_total"])} vs {prev_label} ({r["prev_total"]:,})'
         f' · top {len(r["drivers"])} drivers = {sum(d["count"] for d in r["drivers"]):,}'
-        f' · {recurring} recurring-after-fix alert(s)</div></div>',
+        f' · {recurring} issue(s) still occurring after fix</div></div>',
         unsafe_allow_html=True,
     )
 
 if all_alerts:
     st.markdown('<div class="section-title">Fix alerts on the top drivers</div>', unsafe_allow_html=True)
     order = {"recurring": 0, "overdue": 1}
-    for cat, d, f in sorted(all_alerts, key=lambda a: (order[a[2]["alert"]], -a[2]["since_count"])):
+    for cat, d, f, others in sorted(all_alerts, key=lambda a: (order[a[2]["alert"]], -a[2]["since_count"])):
         tag = "Still occurring after fix" if f["alert"] == "recurring" else "Fix date passed"
+        also = ""
+        if others:
+            verb = {"deployed": "deployed", "resolved": "resolved"}
+            also = " · also " + ", ".join(
+                f'<a class="fix-key" href="{jira_url(o["key"])}" target="_blank">{o["key"]}</a>'
+                + (f' ({verb.get(o["state"], "planned")} {o["date"]:%d %b %Y})' if o["date"] else "")
+                for o in others)
         st.markdown(
             f'<div class="alert-box alert-{f["alert"]}"><span class="alert-tag">{tag}</span>'
             f'<span><b>{cat}</b> · {html.escape(d["driver"])} &rarr; '
             f'<a class="fix-key" href="{jira_url(f["key"])}" target="_blank">{f["key"]}</a>: '
-            f'{html.escape(f["alert_text"])}</span></div>',
+            f'{html.escape(f["alert_text"])}{also}</span></div>',
             unsafe_allow_html=True,
         )
 
@@ -321,18 +224,31 @@ def short(text, n=60):
     return text if len(text) <= n else text[: n - 1] + "…"
 
 
+DRIVER_LABEL_CHARS = 62  # wrap width of the driver names beside the bars
+
+
 def top_bar_chart(drivers, color):
-    data = pd.DataFrame([{"Driver": short(d["driver"]), "Full driver": d["driver"], "Tickets": d["count"],
-                          "Share": f'{d["share"]:.0f}%', "Previous period": d["prev"]} for d in drivers])
+    """Horizontal bars, one per driver, with the full driver name wrapped over
+    as many lines as it needs (each row is tall enough for the longest)."""
+    wrapped = ["\n".join(textwrap.wrap(d["driver"], DRIVER_LABEL_CHARS, break_long_words=True)) or d["driver"]
+               for d in drivers]
+    data = pd.DataFrame([{"Driver": w, "Full driver": d["driver"], "Tickets": d["count"],
+                          "Share": f'{d["share"]:.0f}%', "Previous period": d["prev"]}
+                         for w, d in zip(wrapped, drivers)])
+    lines = max(w.count("\n") + 1 for w in wrapped)
+    row = max(36, 15 * lines + 14)
+    x_max = max(d["count"] for d in drivers) * 1.12 + 0.5  # room for the count beside the longest bar
     base = alt.Chart(data).encode(
-        y=alt.Y("Driver:N", sort="-x", title=None, axis=alt.Axis(labelLimit=380, labelColor=TEXT_SECONDARY)),
-        x=alt.X("Tickets:Q", title=None, axis=alt.Axis(grid=True, gridColor="rgba(255,255,255,0.06)",
-                                                         labelColor=TEXT_MUTED, tickMinStep=1)),
+        y=alt.Y("Driver:N", sort="-x", title=None,
+                axis=alt.Axis(labelLimit=0, labelColor=TEXT_SECONDARY, labelExpr="split(datum.label, '\\n')",
+                              labelLineHeight=15, labelPadding=8)),
+        x=alt.X("Tickets:Q", title=None, scale=alt.Scale(domain=[0, x_max], nice=False),
+                axis=alt.Axis(grid=True, gridColor="rgba(255,255,255,0.06)", labelColor=TEXT_MUTED, tickMinStep=1)),
         tooltip=["Full driver", "Tickets", "Share", "Previous period"],
     )
     bars = base.mark_bar(color=color, cornerRadiusEnd=4, height=18)
     labels = base.mark_text(align="left", dx=6, color=TEXT_PRIMARY, fontWeight="bold").encode(text="Tickets:Q")
-    return (bars + labels).properties(height=max(120, 44 * len(drivers))).configure_view(stroke=None)\
+    return (bars + labels).properties(height=max(120, row * len(drivers))).configure_view(stroke=None)\
         .configure(background="transparent")
 
 
@@ -364,6 +280,15 @@ def weekly_chart(trend, top):
         x=alt.X("Week:O", sort=weeks)).transform_filter(hover)
     return (lines + points + rule).properties(height=320).configure_view(stroke=None)\
         .configure(background="transparent")
+
+
+def sample_tickets_html(samples):
+    links = "".join(
+        f'<a class="sample-key" href="{jira_url(s["key"])}" target="_blank" rel="noopener" '
+        f'title="{html.escape(s["summary"], quote=True)}">{html.escape(s["key"])}</a>'
+        for s in samples
+    )
+    return f'<div class="sample-row"><span>Sample tickets (latest {len(samples)}):</span>{links}</div>'
 
 
 def fix_rows_html(fix_list):
@@ -400,8 +325,12 @@ def fix_rows_html(fix_list):
 # ---------------------------------------------------------------------------
 # Per-category tabs
 # ---------------------------------------------------------------------------
-st.markdown(f'<div class="section-title">Top {config.TREND_TOP_N} drivers &mdash; {html.escape(period_label)}</div>',
-            unsafe_allow_html=True)
+title_col, top_col = st.columns([5, 1.25], vertical_alignment="center")
+title_col.markdown(f'<div class="section-title">Top {top_n} drivers &mdash; {html.escape(period_label)}</div>',
+                   unsafe_allow_html=True)
+with top_col:
+    st.segmented_control("Show", list(TOP_N_OPTIONS), key="trend_top_n",  # value set above
+                         label_visibility="collapsed", width="stretch")
 weekly = {}
 tabs = st.tabs([f"{cat}  ({results[cat]['total']:,})" for cat in ta.CATEGORIES])
 for tab, cat in zip(tabs, ta.CATEGORIES):
@@ -424,23 +353,39 @@ for tab, cat in zip(tabs, ta.CATEGORIES):
                     f'<div class="driver-meta">{d["share"]:.0f}% of {cat} tickets · {delta_html(d["count"], d["prev"])} '
                     f'vs {prev_label} ({d["prev"]}) · grouped by {html.escape(d["source"])} · first seen {first_seen}</div>'
                     f'<div class="driver-summary">{html.escape(d["summary"])}</div>'
+                    f'{sample_tickets_html(d["samples"])}'
                     f'{fix_rows_html(d["fixes"])}</div>',
                     unsafe_allow_html=True,
                 )
                 with st.expander(f'Tickets for #{d["rank"]} ({d["count"]})'):
                     t = d["tickets"]
-                    cols = {"key": "Key", "created": "Created", "status": "Status", "sub_team": "Team / Account",
+                    breakdown = {"SAT": "Channel", "Order Fallout": "Account Type"}.get(cat, "Reporting Area")
+                    cols = {"key": "Key", "created": "Created", "status": "Status", "sub_team": breakdown,
                             "severity": "Severity", "summary": "Summary"}
-                    if cat == "Order Fallout":
+                    if cat == "SAT":
+                        cols = {"key": "Key", "created": "Created", "status": "Status", "sub_team": "Channel",
+                                "summary": "Summary", "sat_issue": "Issue Identified", "sat_subcat": "Issue Sub-Category",
+                                "order_type": "Type of Order", "customer_type": "Customer Type"}
+                    elif d["source"] == ta.FALLOUT_SOURCE:
                         cols.update({"of_reason": "Fallout Reason", "of_step": "Failed Step", "of_error": "Error"})
                     else:
                         cols.update({"inc_cat": "Incident Category", "inc_subcat": "Incident Sub Category"})
                     view = t[list(cols)].rename(columns=cols)
-                    view["Key"] = view["Key"].map(jira_url)
                     view["Created"] = view["Created"].str[:16].str.replace("T", " ")
                     view["Linked"] = t["links"].map(", ".join).values
-                    st.dataframe(view, hide_index=True, width="stretch", height=min(400, 40 + 35 * len(view)),
-                                 column_config={"Key": st.column_config.LinkColumn("Key", display_text=r".*/browse/(.*)$")})
+                    view.insert(0, "S.No", range(1, len(view) + 1))
+                    st.markdown(ui_table.html_table(view, max_height=400), unsafe_allow_html=True)
+
+        if r["drivers"]:
+            # build_excel is defined further down; the lambda runs it on click.
+            st.download_button(
+                f"⬇️ Download {cat} top {len(r['drivers'])} drivers with ticket details (Excel)",
+                data=lambda c=cat: build_excel((c,)),
+                file_name=f"Top_Drivers_{cat.replace(' ', '_')}_{start:%Y-%m-%d}_to_{end:%Y-%m-%d}_Top{top_n}.xlsx",
+                mime=EXCEL_MIME, on_click="ignore", key=f"download_{cat}",
+                help=f"{cat}: the top drivers with summaries and SAL / SFS status, plus every ticket "
+                     "behind them (Jira key, created, status, details) with clickable Jira links.",
+            )
 
         st.markdown(f'<div class="section-title">{cat} &mdash; weekly trend (Sunday – Saturday), '
                     f'last {trend_weeks} weeks</div>', unsafe_allow_html=True)
@@ -450,28 +395,37 @@ for tab, cat in zip(tabs, ta.CATEGORIES):
             st.info("No tickets in this window.")
         else:
             st.altair_chart(weekly_chart(trend, top), width="stretch")
-            st.caption(f"Top {len(top)} drivers of the window; all other drivers are in the table "
+            st.caption(f"Chart shows the top {len(top)} drivers of the window (more lines can't be told apart); "
+                       "all other drivers are in the table "
                        f"(\"Other\" row). The week of {ta.week_label(ta.week_start(end))} runs to "
                        f"{end:%d %b}" + (" (in progress)." if end == today else "."))
             with st.expander("Weekly trend as a table"):
                 pivot = trend.pivot_table(index="driver", columns="week_label", values="count", sort=False)
                 pivot = pivot[[ta.week_label(w) for w in sorted(trend["week"].unique())]]
-                st.dataframe(pivot, width="stretch")
+                pivot.index.name = "Driver"
+                st.markdown(ui_table.html_table(pivot, index=True, kinds={c: "heat" for c in pivot.columns},
+                                                heat_by="row", max_height=420,
+                                                caption="Shading compares each driver with its own busiest week."),
+                            unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
 # Download
 # ---------------------------------------------------------------------------
-def build_excel():
+def build_excel(categories=tuple(ta.CATEGORIES)):
+    """Workbook for the given categories: top drivers, SAL / SFS fix tracking,
+    weekly trend and every ticket behind the top drivers (keys link to Jira).
+    Built only when a download button is clicked."""
     drivers_rows, ticket_frames, trend_frames = [], [], []
-    for cat in ta.CATEGORIES:
+    for cat in categories:
         for d in results[cat]["drivers"]:
             alerts = "; ".join(f"{f['key']}: {f['alert_text']}" for f in d["fixes"] if f["alert"])
             drivers_rows.append({
-                "Period": period_label, "Category": cat, "Rank": d["rank"], "Driver": d["driver"],
+                "Period": period_label, "Timezone": breach_logic.jira_time_label(), "Category": cat, "Rank": d["rank"], "Driver": d["driver"],
                 "Tickets": d["count"], "Share %": d["share"], "Compared with": prev_label,
                 "Tickets then": d["prev"],
                 "Grouped by": d["source"], "Summary": d["summary"],
+                "Sample tickets": ", ".join(s["key"] for s in d["samples"]),
                 "SAL in place": ta.fix_status_text(d["fixes"], "SAL"),
                 "SFS in place": ta.fix_status_text(d["fixes"], "SFS"),
                 "Alert": alerts,
@@ -482,7 +436,7 @@ def build_excel():
             trend_frames.append(weekly[cat].assign(Category=cat))
 
     fix_rows = []
-    for cat in ta.CATEGORIES:
+    for cat in categories:
         for d in results[cat]["drivers"]:
             for f in d["fixes"]:
                 fix_rows.append({"Category": cat, "Rank": d["rank"], "Driver": d["driver"], "Ticket": f["key"],
@@ -498,39 +452,32 @@ def build_excel():
             .rename(columns={"driver": "Driver"})
     if ticket_frames:
         tk = pd.concat(ticket_frames)
-        sheets["Tickets"] = pd.DataFrame({
+        tickets_sheet = pd.DataFrame({
             "Category": tk["Category"], "Rank": tk["Rank"], "Driver": tk["Driver"], "Key": tk["key"],
             "Created": tk["created"].str[:16].str.replace("T", " "), "Status": tk["status"],
-            "Team / Account": tk["sub_team"], "Severity": tk["severity"], "Summary": tk["summary"],
+            "Reporting Area / Account / Channel": tk["sub_team"], "Severity": tk["severity"], "Summary": tk["summary"],
             "Incident Sub Category": tk["inc_subcat"], "Fallout Reason": tk["of_reason"],
             "Failed Step": tk["of_step"], "Error": tk["of_error"],
+            "SAT Issue Identified": tk["sat_issue"], "SAT Issue Sub-Category": tk["sat_subcat"],
+            "SAT Type of Order": tk["order_type"], "SAT Customer Type": tk["customer_type"],
             "Linked": tk["links"].map(", ".join), "Link": tk["key"].map(jira_url),
         })
+        # Drop columns no ticket here uses (e.g. SAT fields in a SAC download).
+        blank = [c for c in tickets_sheet.columns if tickets_sheet[c].fillna("").astype(str).str.strip().eq("").all()]
+        sheets["Tickets"] = tickets_sheet.drop(columns=blank)
 
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        for name, frame in sheets.items():
-            frame.to_excel(writer, sheet_name=name, index=False)
-            ws = writer.sheets[name]
-            header_fill = PatternFill("solid", fgColor="20202C")
-            for cell in ws[1]:
-                cell.font = Font(bold=True, color="FFFFFF")
-                cell.fill = header_fill
-            for idx, col_name in enumerate(frame.columns, start=1):
-                width = min(70, max(len(str(col_name)), frame[col_name].astype(str).str.len().max() or 0) + 2)
-                ws.column_dimensions[ws.cell(row=1, column=idx).column_letter].width = width
-            for row in ws.iter_rows(min_row=2):
-                for cell in row:
-                    cell.alignment = Alignment(wrap_text=True, vertical="top")
-            ws.freeze_panes = "A2"
-    return buf.getvalue()
+    return ui.write_excel(sheets)
+
 
 
 st.markdown('<div class="section-title">Download</div>', unsafe_allow_html=True)
 st.download_button(
-    "⬇️ Download trend analysis (Excel)",
-    data=build_excel(),
-    file_name=f"Ticket_Trend_Analysis_{start:%Y-%m-%d}_to_{end:%Y-%m-%d}.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    help="Top drivers with summaries, SAL / SFS fix tracking and alerts, weekly trend and the ticket list.",
+    "⬇️ Download trend analysis — all categories (Excel)",
+    data=build_excel,
+    file_name=f"Ticket_Trend_Analysis_{start:%Y-%m-%d}_to_{end:%Y-%m-%d}_Top{top_n}.xlsx",
+    mime=EXCEL_MIME, on_click="ignore",
+    help="Top drivers with summaries, SAL / SFS fix tracking and alerts, weekly trend and every ticket "
+         "behind the top drivers, with clickable Jira links.",
 )
+
+ui.done_loading(page_loader)

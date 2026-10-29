@@ -20,6 +20,10 @@ from streamlit_autorefresh import st_autorefresh
 import config
 import jira_client
 import breach_logic
+import ui_table
+# Jira status dot colors ("Tickets by Status" cards, popups) and severity tag
+# colors are shared with the styled tables.
+from ui_table import DEFAULT_STATUS_DOT_COLOR, SEVERITY_TAG_COLORS, STATUS_DOT_COLOR
 
 
 # ---------------------------------------------------------------------------
@@ -82,32 +86,6 @@ CATEGORY_COLOR = {
     "Order Fallout": "#c98500",
 }
 DEFAULT_CATEGORY_COLOR = "#3987e5"
-
-# Jira workflow status -> dot color for the "Tickets by Status" cards. Falls
-# back to a neutral gray for any status not explicitly mapped.
-STATUS_DOT_COLOR = {
-    "escalated": COLOR_CRITICAL,
-    "in progress": COLOR_WARNING,
-    "on hold": COLOR_WARNING,
-    "pending": COLOR_WARNING,
-    "waiting for customer": COLOR_WARNING,
-    "waiting for support": COLOR_WARNING,
-    "open": TEXT_MUTED,
-    "to do": TEXT_MUTED,
-    "new": TEXT_MUTED,
-    "resolved": COLOR_GOOD,
-    "done": COLOR_GOOD,
-    "closed": COLOR_GOOD,
-}
-DEFAULT_STATUS_DOT_COLOR = "#5b5b56"
-
-# Severity tag in ticket popups: (background, text). Anything else (e.g. N/A)
-# falls back to a neutral gray.
-SEVERITY_TAG_COLORS = {
-    "Sev-1": ("#7c4dff", "white"),  # violet
-    "Sev-2": ("#0e7fa6", "white"),  # teal-blue
-}
-
 
 def status_dot_color(status):
     return STATUS_DOT_COLOR.get((status or "").strip().lower(), DEFAULT_STATUS_DOT_COLOR)
@@ -175,10 +153,22 @@ def bucket_popup_html(tickets):
         f'data-summary="{html.escape(t.get("summary") or "", quote=True)}">'
         f'<span class="bucket-popup-key">{html.escape(t["key"])}</span>'
         f'{severity_tag_html(t.get("severity"))}'
+        f'{status_tag_html(t.get("status"))}'
         f'<span class="bucket-popup-assignee" title="{html.escape(t["assignee"])}">{html.escape(t["assignee"])}</span></a>'
         for t in tickets
     )
     return f'<div class="bucket-popup-inner">{items}</div>'
+
+
+def status_tag_html(status):
+    """Current Jira status (Escalated, In Progress, ...) as a pill, with the
+    same dot color as the Tickets by Status cards."""
+    if not status:
+        return ""
+    return (
+        f'<span class="bucket-popup-status"><span class="dot" style="background:{status_dot_color(status)};"></span>'
+        f'{html.escape(status)}</span>'
+    )
 
 
 def severity_tag_html(severity):
@@ -421,15 +411,15 @@ def ticket_link_html(key, css_class="esc-key", title=""):
 
 
 def ticket_details_view(df):
-    """Ticket Details table: S.No from 1, Key as a Jira URL (rendered as a
-    link), readable Created time, and internal columns dropped."""
+    """Ticket Details table: S.No from 1, readable Created time, internal
+    columns dropped (ui_table links the Key and styles status / SLA cells)."""
     def fmt_created(raw):
         dt = breach_logic._parse_datetime(raw)
         return dt.strftime("%Y-%m-%d %H:%M") if dt else ""
 
     view = pd.DataFrame({
         "S.No": range(1, len(df) + 1),
-        "Key": df["Key"].map(jira_ticket_url),
+        "Key": df["Key"],
         "Summary": df["Summary"],
         "Status": df["Status"],
         "Priority": df["Priority"],
@@ -499,6 +489,35 @@ def escalated_links_popup_html(tickets):
     return f'<div class="bucket-popup-inner">{"".join(blocks)}</div>'
 
 
+APP_NAME = "JIRA - SLA Tracker & Notifier"
+APP_SUBTITLE = "Real-time ticket monitoring across Retail, SAC, B2B and Order Fallout queues"
+
+
+def bell_svg(size):
+    return (
+        f'<svg viewBox="0 0 24 24" width="{size}" height="{size}" fill="white">'
+        '<path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.89 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2zm-9.44-8.6l-1.06-1.06C6.09 5.64 5 8.51 5 11h1.5c0-2.42.72-4.78 2.06-6.6zM19.5 11H21c0-2.49-1.09-5.36-2.5-7.66l-1.06 1.06C18.78 6.22 19.5 8.58 19.5 11z"/>'
+        '</svg>'
+    )
+
+
+HEADER_HTML = (
+    f'<div class="app-header"><div class="app-logo">{bell_svg(19)}</div><div>'
+    f'<div class="app-title">{html.escape(APP_NAME)}</div>'
+    f'<div class="app-subtitle">{html.escape(APP_SUBTITLE)}</div>'
+    '</div></div>'
+)
+
+# Shown on a session's first load while every team's tickets are fetched from
+# Jira (~20 s): the same header, in the same place as the dashboard's, with
+# the loading status below it. Later auto-refreshes keep the previous
+# dashboard on screen instead.
+LOADER_HTML = (
+    f'<div class="app-loader">{HEADER_HTML}'
+    '<div class="app-loader-status"><span class="app-loader-spinner"></span>'
+    'Loading dashboard&hellip; fetching the latest tickets from Jira</div></div>'
+)
+
 st.set_page_config(page_title="Jira Breach Monitor", page_icon="🔔", layout="wide")
 
 AUTO_REFRESH_SECONDS = 60  # matches load_category_data/load_resolved_data cache ttl
@@ -555,14 +574,28 @@ st.markdown(
         .app-logo svg {{ display: block; }}
         .app-title {{ font-size: 1.15rem; font-weight: 700; color: {TEXT_PRIMARY}; line-height: 1.1; }}
         .app-subtitle {{ font-size: 0.75rem; color: {TEXT_MUTED}; margin-top: 1px; }}
-        .app-refreshed {{ font-size: 0.68rem; color: {TEXT_MUTED}; text-align: right; }}
+        .app-refreshed {{ font-size: 0.68rem; color: {TEXT_MUTED}; text-align: right; margin-top: 6px; line-height: 1.35; }}
         a.trend-link {{
             display: block; text-align: center; padding: 6px 10px; border-radius: 8px;
             background: linear-gradient(135deg, {ACCENT_FROM}, {ACCENT_TO});
             color: white !important; font-size: 0.85rem; font-weight: 600; text-decoration: none !important;
         }}
         a.trend-link:hover {{ filter: brightness(1.12); }}
+        .page-links {{ display: flex; flex-direction: column; gap: 6px; }}
+        .page-links a.trend-link {{ font-size: 0.8rem; padding: 5px 8px; }}
         .header-spacer {{ height: 2px; }}
+
+        .app-loader {{ min-height: 60vh; }}
+        .app-loader-status {{
+            display: flex; align-items: center; gap: 10px; margin-top: 30px;
+            font-size: 0.9rem; color: {TEXT_SECONDARY};
+        }}
+        .app-loader-spinner {{
+            width: 18px; height: 18px; border-radius: 50%; display: inline-block;
+            border: 2.5px solid rgba(255,255,255,0.15); border-top-color: {ACCENT_TO};
+            animation: app-loader-spin 0.9s linear infinite;
+        }}
+        @keyframes app-loader-spin {{ to {{ transform: rotate(360deg); }} }}
 
         .overall-summary {{
             display: flex; align-items: center; justify-content: space-evenly; gap: 12px;
@@ -637,7 +670,7 @@ st.markdown(
 
         .bucket-popup {{
             position: absolute; left: 0; top: 100%; z-index: 30;
-            width: max-content; min-width: 100%; max-width: 420px;
+            width: max-content; min-width: 100%; max-width: 500px;
             padding-top: 4px;
             display: none;  /* not just invisible: hidden popups must not widen the page */
         }}
@@ -671,7 +704,7 @@ st.markdown(
         .bucket-popup.align-right {{ left: auto; right: 0; }}
         .bucket-popup-item {{
             display: flex; align-items: center; justify-content: space-between; gap: 14px;
-            padding: 6px 10px; border-radius: 6px; text-decoration: none;
+            padding: 6px 10px; border-radius: 6px; text-decoration: none !important;
             font-size: 0.82rem; color: {TEXT_SECONDARY};
         }}
         .bucket-popup-item:hover {{ background: rgba(255,255,255,0.06); color: {TEXT_PRIMARY}; }}
@@ -681,6 +714,13 @@ st.markdown(
             color: white; white-space: nowrap; flex-shrink: 0;
         }}
         .bucket-popup-key + .bucket-popup-tag {{ margin-left: -6px; margin-right: auto; }}  /* sits next to the key */
+        .bucket-popup-status {{
+            display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; white-space: nowrap;
+            font-size: 0.66rem; font-weight: 600; color: {TEXT_SECONDARY};
+            padding: 1px 8px; border-radius: 999px; border: 1px solid rgba(255,255,255,0.16);
+        }}
+        .bucket-popup-status .dot {{ width: 6px; height: 6px; border-radius: 50%; display: inline-block; }}
+        .bucket-popup-key + .bucket-popup-status {{ margin-left: -6px; margin-right: auto; }}  /* no severity tag */
         .bucket-popup-key {{ font-weight: 700; color: {TEXT_PRIMARY}; white-space: nowrap; flex-shrink: 0; }}
         .bucket-popup-assignee {{
             text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -734,6 +774,7 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+st.markdown(f"<style>{ui_table.TABLE_CSS}</style>", unsafe_allow_html=True)
 st.html(POPUP_SCRIPT, unsafe_allow_javascript=True)
 
 ESCALATION_PATH_FIELD = "customfield_10883"
@@ -940,19 +981,13 @@ def sla_pct_color(pct):
     return COLOR_CRITICAL
 
 
-def style_status(val):
-    colors = {
-        breach_logic.STATUS_BREACHED: f"background-color: #4C1D1D; color: {COLOR_CRITICAL}; font-weight: 600",
-        breach_logic.STATUS_WARNING: f"background-color: #4A3A0F; color: {COLOR_WARNING}; font-weight: 600",
-        breach_logic.STATUS_OK: "background-color: #14321F; color: #86EFAC; font-weight: 600",
-        breach_logic.STATUS_UNKNOWN: "background-color: #2D333B; color: #C9D1D9; font-weight: 600",
-    }
-    return colors.get(val, "")
-
-
 # ---------------------------------------------------------------------------
 # Fetch all category data once (shared by every section below)
 # ---------------------------------------------------------------------------
+loader = st.empty()
+if not st.session_state.get("dashboard_loaded"):
+    loader.markdown(LOADER_HTML, unsafe_allow_html=True)
+
 category_data = {}
 category_errors = {}
 resolved_data = {}
@@ -981,6 +1016,9 @@ for category, cat_config in config.CATEGORIES.items():
             backlog_data[category] = load_category_data(category, {**cat_config, "jql": cat_config["backlog_jql"]})
         except Exception as exc:
             backlog_errors[category] = exc
+
+loader.empty()
+st.session_state["dashboard_loaded"] = True
 
 for category, exc in category_errors.items():
     st.error(f"Failed to load {category}: {exc}")
@@ -1086,14 +1124,7 @@ overall_inflow_display = "—" if inflow_errors and not inflow_data else len(ove
 header_col1, header_col2, header_col3 = st.columns([2.5, 3.9, 1.3])
 with header_col1:
     st.markdown(
-        '<div class="app-header"><div class="app-logo">'
-        '<svg viewBox="0 0 24 24" width="19" height="19" fill="white">'
-        '<path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.89 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2zm-9.44-8.6l-1.06-1.06C6.09 5.64 5 8.51 5 11h1.5c0-2.42.72-4.78 2.06-6.6zM19.5 11H21c0-2.49-1.09-5.36-2.5-7.66l-1.06 1.06C18.78 6.22 19.5 8.58 19.5 11z"/>'
-        '</svg>'
-        '</div><div>'
-        '<div class="app-title">JIRA - SLA Tracker & Notifier</div>'
-        '<div class="app-subtitle">Real-time ticket monitoring across Retail, SAC, B2B and Order Fallout queues</div>'
-        '</div></div>',
+        HEADER_HTML,
         unsafe_allow_html=True,
     )
 with header_col2:
@@ -1121,15 +1152,18 @@ with header_col3:
     if st.button("🔄  Refresh now", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
-    # pages/Ticket_Trend_Analysis.py, opened in its own browser tab.
+    # pages/Ticket_Trend_Analysis.py and pages/Resolved_Tickets_History.py,
+    # each opened in its own browser tab.
     st.markdown(
+        '<div class="page-links">'
         '<a class="trend-link" href="Ticket_Trend_Analysis" target="_blank" rel="noopener">'
-        '📈&nbsp; Ticket Trend Analysis &#8599;</a>',
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        f'<div class="app-refreshed">Last refreshed: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
-        f' &middot; auto-refreshes every {AUTO_REFRESH_SECONDS // 60} min</div>',
+        '📈&nbsp; Ticket Trend Analysis &#8599;</a>'
+        '<a class="trend-link" href="Resolved_Tickets_History" target="_blank" rel="noopener">'
+        '✅&nbsp; Resolved History &#8599;</a></div>'
+        # Same block as the links, so the note always sits below them.
+        f'<div class="app-refreshed">Last refreshed: {breach_logic.jira_now():%Y-%m-%d %H:%M:%S %Z}'
+        f' &middot; auto-refreshes every {AUTO_REFRESH_SECONDS // 60} min'
+        f'<br>All times in {html.escape(breach_logic.jira_time_label())}</div>',
         unsafe_allow_html=True,
     )
 
@@ -1373,20 +1407,7 @@ for tab, (category, cat_config) in zip(tabs, config.CATEGORIES.items()):
         )
         shown = df[df["Breach Status"].isin(breach_filter)] if breach_filter else df
 
-        st.dataframe(
-            ticket_details_view(shown).style.map(style_status, subset=["Breach Status"])
-            .format({"Hours Remaining": "{:.1f}"}, na_rep=""),
-            use_container_width=True,
-            height=500,
-            hide_index=True,
-            column_config={
-                "S.No": st.column_config.NumberColumn("S.No", width="small"),
-                # The cell holds the Jira URL; only the key is displayed.
-                "Key": st.column_config.LinkColumn("Key", display_text=r".*/browse/(.*)$"),
-                "Summary": st.column_config.TextColumn("Summary", width="large"),
-                "Hours Remaining": st.column_config.NumberColumn("Hours Remaining", format="%.1f"),
-            },
-        )
+        st.markdown(ui_table.html_table(ticket_details_view(shown), max_height=500), unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
 # Section: Productivity by Assignee — Today
@@ -1449,7 +1470,7 @@ else:
         grand_total[col] = int(productivity_df[col].sum())
     display_df = pd.concat([productivity_df, pd.DataFrame([grand_total])], ignore_index=True)
 
-    st.dataframe(display_df, use_container_width=True, height=min(500, 60 + 35 * len(display_df)))
+    st.markdown(ui_table.html_table(display_df, total_row=True, max_height=500), unsafe_allow_html=True)
 
     excel_buffer = io.BytesIO()
     with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
