@@ -224,7 +224,7 @@ def resolved_row(issue, category):
         result["due_date"].isoformat() if result["due_date"] else "",
         result["status"], result["severity"] or "N/A",
         (f.get("priority") or {}).get("name", ""), (f.get("status") or {}).get("name", ""),
-        (f.get("assignee") or {}).get("displayName", "Unassigned"), f.get("summary") or "",
+        jira_client.assignee_name(issue), f.get("summary") or "",
     )
 
 
@@ -241,15 +241,15 @@ def _full_resolved_load(conn, progress=None):
     def fetch(task):
         cat, (a, b) = task
         jql = _resolved_jql(cat, f'resolutiondate >= "{a:%Y-%m-%d}" AND resolutiondate < "{b:%Y-%m-%d}"')
-        return cat, jira_client.search_issues(jql, fields=RESOLVED_FIELDS)
+        # rows built here, in the pool: unassigned tickets need a changelog call
+        return [resolved_row(i, cat) for i in jira_client.search_issues(jql, fields=RESOLVED_FIELDS)]
 
     conn.execute("DROP TABLE IF EXISTS resolved_new")
     conn.execute("CREATE TABLE resolved_new AS SELECT * FROM resolved WHERE 0")
     done = 0
     with ThreadPoolExecutor(max_workers=6) as pool:
-        for cat, issues in pool.map(fetch, tasks):
-            conn.executemany("INSERT OR REPLACE INTO resolved_new VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                             [resolved_row(i, cat) for i in issues])
+        for rows in pool.map(fetch, tasks):
+            conn.executemany("INSERT OR REPLACE INTO resolved_new VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", rows)
             conn.commit()
             done += 1
             if progress:

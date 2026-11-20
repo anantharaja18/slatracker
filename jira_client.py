@@ -27,9 +27,13 @@ RETRY_WAITS = [2, 5, 15, 30]
 
 
 def _post_with_retry(url, payload):
+    return _request_with_retry("POST", url, json=payload)
+
+
+def _request_with_retry(method, url, **kwargs):
     for attempt, wait in enumerate([*RETRY_WAITS, None]):
         try:
-            resp = requests.post(url, json=payload, auth=_auth(), timeout=60)
+            resp = requests.request(method, url, auth=_auth(), timeout=60, **kwargs)
             if resp.status_code not in RETRY_STATUS or wait is None:
                 resp.raise_for_status()
                 return resp.json()
@@ -75,6 +79,40 @@ def search_issues(jql: str, fields=None, max_results: int = 100):
             break
 
     return issues
+
+
+def get_changelog(key: str):
+    """Every changelog entry of one issue, oldest first."""
+    url = f"{config.JIRA_BASE_URL.rstrip('/')}/rest/api/3/issue/{key}/changelog"
+    histories, start = [], 0
+    while True:
+        data = _request_with_retry("GET", url, params={"startAt": start, "maxResults": 100})
+        histories.extend(data.get("values", []))
+        start += len(data.get("values", []))
+        if data.get("isLast", True) or not data.get("values"):
+            break
+    return sorted(histories, key=lambda h: h["created"])
+
+
+def assignee_name(issue: dict, fallback: str = "Unassigned"):
+    """The issue's assignee; for an unassigned issue, whoever worked it, from
+    the changelog: the last person it was assigned to, else the first person
+    (not an automation) who moved it to In Progress."""
+    assignee = (issue["fields"].get("assignee") or {}).get("displayName")
+    if assignee:
+        return assignee
+    histories = get_changelog(issue["key"])
+    last_assigned = None
+    first_worker = None
+    for h in histories:
+        author = h.get("author") or {}
+        for item in h.get("items", []):
+            if item.get("field") == "assignee" and item.get("toString"):
+                last_assigned = item["toString"]
+            elif (item.get("field") == "status" and item.get("toString") == "In Progress"
+                  and first_worker is None and author.get("accountType") != "app"):
+                first_worker = author.get("displayName")
+    return last_assigned or first_worker or fallback
 
 
 def get_field_value(issue: dict, field_id: str):

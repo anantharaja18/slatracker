@@ -84,7 +84,7 @@ CHECK_INTERVAL_MINUTES = 30
 # warn_hours     -> how many hours before the deadline counts as
 #                   "About to Breach" (breach itself = deadline has passed)
 # resolved_scope_jql -> every resolved ticket in the team's scope, any date,
-#                  excluding cancelled tickets
+#                  excluding cancelled tickets (by status or resolution)
 #                  (Resolved History page); the dashboard's "resolved_jql"
 #                  (resolved today) is built from it below
 # inflow_jql     -> every ticket created today in the team's scope, whatever
@@ -96,7 +96,7 @@ SEVERITY_FIELD = "customfield_10051"  # "Severity" custom field -- values are "S
 
 # SLA override applied to every category, measured from ticket Created time:
 # Sev-1 = 1 hour, Sev-2 = 4 hours. Jira's own SLA timers are not used.
-SLA_MINUTES = {"Sev-1": 60, "Sev-2": 120}
+SLA_MINUTES = {"Sev-1": 60, "Sev-2": 240}
 
 # B2B tickets are counted only under B2B: Retail and SAC exclude them (keeping
 # tickets with no Account type) so no ticket shows up under two teams.
@@ -111,7 +111,7 @@ CATEGORIES = {
         "resolved_scope_jql": (
             'project = 10145 AND "Reporting Area[Dropdown]" = Retail '
             'AND ("Account type[Dropdown]" != "B2B" OR "Account type[Dropdown]" is EMPTY) '
-            'AND resolution is not EMPTY AND status NOT IN (Canceled, Cancelled)'
+            'AND resolution is not EMPTY AND resolution != Cancelled AND status NOT IN (Canceled, Cancelled)'
         ),
         "inflow_jql": (
             'project = 10145 AND "Reporting Area[Dropdown]" = Retail '
@@ -134,7 +134,7 @@ CATEGORIES = {
         "resolved_scope_jql": (
             'project = SAC AND "Reporting Area" != Retail AND reporter != "SAC BOT" '
             'AND ("Account type[Dropdown]" != "B2B" OR "Account type[Dropdown]" is EMPTY) '
-            'AND resolution is not EMPTY AND status NOT IN (Canceled, Cancelled)'
+            'AND resolution is not EMPTY AND resolution != Cancelled AND status NOT IN (Canceled, Cancelled)'
         ),
         "inflow_jql": (
             'project = SAC AND "Reporting Area" != Retail AND reporter != "SAC BOT" '
@@ -158,17 +158,17 @@ CATEGORIES = {
     "B2B": {
         "jql": (
             'project = SAC AND "Account type[Dropdown]" = "B2B" AND '
-            '"Reporting Area[Dropdown]" != "Order Fallout" AND status not in '
+            '"Reporting Area[Dropdown]" NOT IN ("Order Fallout", Retail) AND status not in '
             '(Resolved, Closed, Canceled, Cancelled, "Waiting for customer") ORDER BY created DESC'
         ),
         "resolved_scope_jql": (
             'project = SAC AND "Account type[Dropdown]" = "B2B" AND '
-            '"Reporting Area[Dropdown]" != "Order Fallout" '
-            'AND resolution is not EMPTY AND status NOT IN (Canceled, Cancelled)'
+            '"Reporting Area[Dropdown]" NOT IN ("Order Fallout", Retail) '
+            'AND resolution is not EMPTY AND resolution != Cancelled AND status NOT IN (Canceled, Cancelled)'
         ),
         "inflow_jql": (
             'project = SAC AND "Account type[Dropdown]" = "B2B" AND '
-            '"Reporting Area[Dropdown]" != "Order Fallout" '
+            '"Reporting Area[Dropdown]" NOT IN ("Order Fallout", Retail) '
             'AND created >= startofday() '
             'AND status NOT IN (Canceled, Cancelled)'
         ),
@@ -180,14 +180,16 @@ CATEGORIES = {
     "Order Fallout": {
         "jql": (
             'project = SAC AND status in ("In Progress", "Waiting for support", Escalated) '
-            'AND "Reporting Area[Dropdown]" = "Order fallout"'
+            'AND "Reporting Area[Dropdown]" = "Order fallout" AND summary !~ "POSSIBLE DUPLICATE"'
         ),
         "resolved_scope_jql": (
             'project = SAC AND "Reporting Area[Dropdown]" = "Order fallout" '
-            'AND resolution is not EMPTY AND status NOT IN (Canceled, Cancelled)'
+            'AND summary !~ "POSSIBLE DUPLICATE" '
+            'AND resolution is not EMPTY AND resolution != Cancelled AND status NOT IN (Canceled, Cancelled)'
         ),
         "inflow_jql": (
             'project = SAC AND "Reporting Area[Dropdown]" = "Order fallout" '
+            'AND summary !~ "POSSIBLE DUPLICATE" '
             'AND created >= startofday() '
             'AND status NOT IN (Canceled, Cancelled)'
         ),

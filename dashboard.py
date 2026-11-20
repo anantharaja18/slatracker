@@ -854,7 +854,7 @@ def load_resolved_data(category, cat_config):
             "Summary": f.get("summary", ""),
             "Status": (f.get("status") or {}).get("name", ""),
             "Severity": result["severity"] or "N/A",
-            "Assignee": (f.get("assignee") or {}).get("displayName", "Unassigned"),
+            "Assignee": jira_client.assignee_name(issue),
             "Resolved Status": result["status"],
             "Due Datetime": result["due_date"],
             "Created Today": created_today(f.get("created")),

@@ -44,6 +44,20 @@ def in_period(df, start, end):
     return df[(df["resolved_date"] >= start) & (df["resolved_date"] <= end)]
 
 
+# Which resolved tickets to count, like the dashboard's header: created on the
+# day they were resolved (that day's inflow) or created on an earlier day.
+INFLOW_ALL, INFLOW_SAME_DAY, INFLOW_PAST = "All resolved", "Resolved from the day's inflow", "Resolved from past inflow"
+INFLOW_OPTIONS = [INFLOW_ALL, INFLOW_SAME_DAY, INFLOW_PAST]
+
+
+def by_inflow(df, which):
+    if which == INFLOW_SAME_DAY:
+        return df[df["same_day"]]
+    if which == INFLOW_PAST:
+        return df[~df["same_day"]]
+    return df
+
+
 def sla_pct(within, late):
     judged = within + late
     return round(within / judged * 100, 1) if judged else None
@@ -116,8 +130,11 @@ def by_assignee(df, start, end, teams, assignees=None):
     counts = counts.reindex(columns=[t for t in teams if t in counts.columns]).add_suffix(" (Resolved)")
     within = part[part["sla"] == WITHIN].groupby("assignee").size()
     late = part[part["sla"] == LATE].groupby("assignee").size()
+    same_day = part[part["same_day"]].groupby("assignee").size().reindex(counts.index, fill_value=0)
     table = counts.assign(**{
         "Total Resolved": counts.sum(axis=1),
+        INFLOW_SAME_DAY: same_day,
+        INFLOW_PAST: counts.sum(axis=1) - same_day,
         "Within SLA": within.reindex(counts.index, fill_value=0),
         "Resolved late": late.reindex(counts.index, fill_value=0),
     })

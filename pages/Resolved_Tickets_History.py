@@ -108,7 +108,10 @@ def assignee_table_html(table, teams):
     head = ('<th>Assignee</th>'
             + "".join(f'<th><span class="dot" style="background:{TEAM_COLOR[t]};"></span>{html.escape(t)}</th>'
                       for t in team_cols)
-            + '<th>Total resolved</th><th>Within SLA</th><th>Resolved late</th><th>SLA %</th>')
+            + '<th>Total resolved</th>'
+            + '<th title="Created on the same day it was resolved">Resolved from<br>today\'s inflow</th>'
+            + '<th title="Created on an earlier day than it was resolved">Resolved from<br>past inflow</th>'
+            + '<th>Within SLA</th><th>Resolved late</th><th>SLA %</th>')
     body = []
     for _, r in rows.iterrows():
         width = int(r["Total Resolved"]) / busiest * 100
@@ -118,12 +121,14 @@ def assignee_table_html(table, teams):
             + "".join(f'<td>{count(r[f"{t} (Resolved)"])}</td>' for t in team_cols)
             + f'<td><span class="asg-total"><span class="asg-bar"><span style="width:{width:.0f}%;"></span></span>'
               f'{int(r["Total Resolved"]):,}</span></td>'
+            + f'<td>{count(r[ra.INFLOW_SAME_DAY])}</td><td>{count(r[ra.INFLOW_PAST])}</td>'
             + f'<td>{count(r["Within SLA"], "asg-good")}</td><td>{count(r["Resolved late"], "asg-bad")}</td>'
             + f'<td>{sla_cell(r["SLA %"])}</td></tr>'
         )
     grand = (f'<tr class="asg-grand"><td>Grand Total ({len(rows)} assignee{"s" if len(rows) != 1 else ""})</td>'
              + "".join(f'<td>{int(total[f"{t} (Resolved)"]):,}</td>' for t in team_cols)
-             + f'<td>{int(total["Total Resolved"]):,}</td><td class="asg-good">{int(total["Within SLA"]):,}</td>'
+             + f'<td>{int(total["Total Resolved"]):,}</td>'
+               f'<td>{int(total[ra.INFLOW_SAME_DAY]):,}</td><td>{int(total[ra.INFLOW_PAST]):,}</td><td class="asg-good">{int(total["Within SLA"]):,}</td>'
                f'<td class="asg-bad">{int(total["Resolved late"]):,}</td><td>{sla_cell(total["SLA %"])}</td></tr>')
     return (f'<div class="asg-wrap"><table class="asg-table"><thead><tr>{head}</tr></thead>'
             f'<tbody>{"".join(body)}{grand}</tbody></table></div>'
@@ -228,26 +233,37 @@ st.markdown(f'<div class="section-title">Resolved by assignee &mdash; {html.esca
 a1, a2 = st.columns([1, 1.6])
 with a1:
     team_filter = st.multiselect("Teams", ra.TEAMS, default=ra.TEAMS, key="resolved_assignee_teams") or ra.TEAMS
+period_part = ra.in_period(resolved, start, end)
+period_part = period_part[period_part["category"].isin(team_filter)]
+inflow_counts = {opt: len(ra.by_inflow(period_part, opt)) for opt in ra.INFLOW_OPTIONS}
+inflow_filter = st.radio(
+    "Resolved tickets", ra.INFLOW_OPTIONS, horizontal=True, key="resolved_assignee_inflow",
+    format_func=lambda opt: f"{opt} ({inflow_counts[opt]:,})",
+    help="The day's inflow = created on the same day it was resolved (the dashboard's \"Resolved from "
+         "Today Inflow\"). Past inflow = created on an earlier day (\"Resolved from Past Inflow\").")
+assignee_src = ra.by_inflow(resolved, inflow_filter)
 with a2:
-    people = ra.assignees_in(resolved, start, end, team_filter)
+    people = ra.assignees_in(assignee_src, start, end, team_filter)
     person_filter = st.multiselect("Assignee", people, key="resolved_assignee_people",
                                    placeholder="All assignees — type a name to filter")
-assignees = ra.by_assignee(resolved, start, end, team_filter, person_filter)
+assignees = ra.by_assignee(assignee_src, start, end, team_filter, person_filter)
 if assignees.empty:
-    st.info("No resolved tickets for these teams in this period.")
+    st.info("No resolved tickets for these teams and this selection in this period.")
 else:
     st.markdown(assignee_table_html(assignees, team_filter), unsafe_allow_html=True)
 
-    def build_assignee_excel(teams=tuple(team_filter), people=tuple(person_filter), table=assignees):
-        """This panel as shown (teams / assignee filters, period) plus the
-        resolved tickets behind it; built only when the button is clicked."""
-        tickets_part = ra.ticket_list(resolved, start, end)
+    def build_assignee_excel(teams=tuple(team_filter), people=tuple(person_filter), table=assignees,
+                             which=inflow_filter):
+        """This panel as shown (teams / inflow / assignee filters, period) plus
+        the resolved tickets behind it; built only when the button is clicked."""
+        tickets_part = ra.ticket_list(ra.by_inflow(resolved, which), start, end)
         tickets_part = tickets_part[tickets_part["Team"].isin(teams)]
         if people:
             tickets_part = tickets_part[tickets_part["Assignee"].isin(people)]
         tickets_part = tickets_part.assign(**{"S.No": range(1, len(tickets_part) + 1)})
         info = pd.DataFrame([{"Period": label, "Timezone": breach_logic.jira_time_label(),
-                              "Teams": ", ".join(teams), "Assignees": ", ".join(people) or "All"}])
+                              "Teams": ", ".join(teams), "Resolved tickets": which,
+                              "Assignees": ", ".join(people) or "All"}])
         return ui.write_excel({
             "By Assignee": table,
             "Tickets": tickets_part.assign(Link=tickets_part["Key"].map(jira_url)),
@@ -257,7 +273,8 @@ else:
     st.download_button(
         "⬇️ Download resolved by assignee (Excel)",
         data=build_assignee_excel, on_click="ignore", key="download_by_assignee",
-        file_name=f"Resolved_By_Assignee_{start:%Y-%m-%d}_to_{end:%Y-%m-%d}.xlsx",
+        file_name=(f"Resolved_By_Assignee_{start:%Y-%m-%d}_to_{end:%Y-%m-%d}"
+                   f"{ {ra.INFLOW_SAME_DAY: '_day_inflow', ra.INFLOW_PAST: '_past_inflow'}.get(inflow_filter, '')}.xlsx"),
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         help="The table above (with your Teams / Assignee filters) and every resolved ticket behind it, "
              "with clickable Jira links.",
