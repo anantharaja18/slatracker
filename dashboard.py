@@ -1663,6 +1663,16 @@ with st.expander("Teams report settings (admin)"):
         enabled = st.toggle("Send a report every 2 hours", value=saved["enabled"], key="report_enabled")
         if enabled != saved["enabled"]:
             report_settings.save({**report_settings.load(), "enabled": enabled})
+        eod_enabled = st.toggle("Send end-of-day report at 00:00:00 Jira time (covers the previous full day)",
+                                value=saved["eod_enabled"], key="report_eod_enabled")
+        if eod_enabled != saved["eod_enabled"]:
+            report_settings.save({**report_settings.load(), "eod_enabled": eod_enabled})
+        if st.button("Send end-of-day report now", key="report_eod_now"):
+            try:
+                scheduler.send_eod_now()
+                st.success("End-of-day report sent to IM Chat; the Excel file is in the reports folder")
+            except Exception as exc:
+                st.error(f"Not sent: {exc}")
         if st.button("Send now", key="report_send_now"):
             try:
                 scheduler.send_now()

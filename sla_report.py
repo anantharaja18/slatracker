@@ -14,6 +14,7 @@ with dashboard.py if they ever change.
 """
 
 import argparse
+import base64
 import html
 import os
 import time
@@ -170,7 +171,7 @@ def workflow_payload(parts):
                    "cells": [cell(v, i, bold=True) for i, v in enumerate(header)]}]
     for r in parts["rows"]:
         # Order Fallout only has Sev-2 tickets, so leave out its empty Sev-1 row.
-        if r["Team"] == "Order Fallout" and r["Sev"] == "Sev-1" and not (r["Resolved"] or r["Open"]):
+        if r["Team"] == "Order Fallout" and r["Sev"] == "Sev-1" and not (r["Resolved"] or r["Within"] or r["Late"]):
             continue
         is_all = r["Team"] == "All teams"
         pct = "—" if r["SLA"] is None else f"{r['SLA']:.1f}%"
@@ -244,37 +245,220 @@ def next_slot(now):
     return tomorrow.replace(hour=SLOT_HOURS[0], minute=0, second=0, microsecond=0)
 
 
+EOD_FIELDS = ["summary", "status", "assignee", "created", "resolutiondate", config.SEVERITY_FIELD]
+REPORTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports")
+
+
+def fetch_resolved_on_day(day):
+    """Every ticket resolved on `day` (00:00:00 to 23:59:59 Jira time) in each
+    team's scope, whenever it was created."""
+    start = f"{day:%Y/%m/%d} 00:00"
+    end = f"{day + timedelta(days=1):%Y/%m/%d} 00:00"
+    rows = []
+    for team, cat_config in config.CATEGORIES.items():
+        jql = f'{cat_config["resolved_scope_jql"]} AND resolutiondate >= "{start}" AND resolutiondate < "{end}"'
+        for issue in jira_client.search_issues(jql, fields=EOD_FIELDS):
+            f = issue["fields"]
+            result = breach_logic.evaluate_resolution(issue, cat_config)
+            created = breach_logic._parse_datetime(f.get("created"))
+            resolved = breach_logic._parse_datetime(f.get("resolutiondate"))
+            created_on_day = created is not None and created.astimezone(breach_logic.JIRA_TZ).date() == day
+            rows.append({
+                "Team": team, "Key": issue["key"], "Summary": f.get("summary", ""),
+                "Severity": result["severity"] or "N/A",
+                "Status": (f.get("status") or {}).get("name", ""),
+                "Assignee": (f.get("assignee") or {}).get("displayName", "Unassigned"),
+                "Created": created, "Resolved": resolved,
+                "Resolved Status": result["status"],
+                "Created Today": created_on_day,
+            })
+    return pd.DataFrame(rows, columns=["Team", "Key", "Summary", "Severity", "Status", "Assignee",
+                                       "Created", "Resolved", "Resolved Status", "Created Today"])
+
+
+def eod_ticket_sheet(resolved_day):
+    """Every ticket resolved on the day, one row each, with Jira links."""
+    labels = {breach_logic.STATUS_OK: "Within SLA", breach_logic.STATUS_BREACHED: "Resolved late"}
+
+    def stamp(value):
+        return "" if value is None or pd.isna(value) else value.astimezone(breach_logic.JIRA_TZ).strftime("%Y-%m-%d %H:%M")
+
+    sheet = pd.DataFrame({
+        "Team": resolved_day["Team"].values,
+        "Key": resolved_day["Key"].values,
+        "Summary": resolved_day["Summary"].values,
+        "Severity": resolved_day["Severity"].values,
+        "Status": resolved_day["Status"].values,
+        "Assignee": resolved_day["Assignee"].values,
+        "Created": resolved_day["Created"].map(stamp).values,
+        "Resolved": resolved_day["Resolved"].map(stamp).values,
+        "Created & Resolved Same Day": resolved_day["Created Today"].map({True: "Yes", False: "No"}).values,
+        "SLA": resolved_day["Resolved Status"].map(labels).fillna("No SLA (severity not set)").values,
+    })
+    sheet["Link"] = sheet["Key"].map(lambda key: f"{config.JIRA_BASE_URL.rstrip('/')}/browse/{key}")
+    return sheet
+
+
+def previous_day():
+    """The last full day in Jira time."""
+    return breach_logic.jira_now().date() - timedelta(days=1)
+
+
+def build_eod_report(day):
+    """Builds the end-of-day report for `day`, saves the Excel file, returns the card parts."""
+    import ui_common  # Excel styling helper (write_excel)
+
+    resolved_day = fetch_resolved_on_day(day)
+    empty_open = pd.DataFrame(columns=["Team", "Key", "Severity"])
+    rows = summary_rows(resolved_day, empty_open)  # resolved only: SLA % = within / (within + late)
+    for r in rows:
+        r["Open"] = "—"
+    sheet = eod_ticket_sheet(resolved_day)
+    summary = pd.DataFrame(rows)
+    os.makedirs(REPORTS_DIR, exist_ok=True)
+    path = os.path.join(REPORTS_DIR, f"EOD_SLA_Report_{day:%Y-%m-%d}.xlsx")
+    with open(path, "wb") as f:
+        same_day = sheet["Created & Resolved Same Day"] == "Yes"
+        f.write(ui_common.write_excel({
+            "Summary": summary,
+            "Resolved from Today's Inflow": sheet[same_day],
+            "Resolved from Past Inflow": sheet[~same_day],
+        }))
+    return {
+        "title": f"End of day SLA report — {day:%d %b %Y}",
+        "as_of": (f"Tickets resolved {day:%d %b %Y} 00:00:00 to 23:59:59 Jira time ({breach_logic.JIRA_TZ}) · "
+                  f"{len(resolved_day)} resolved tickets"),
+        "rows": rows,
+        "footnote": f"Full ticket list ({len(sheet)} tickets, with Jira links) saved to: {path}",
+        "path": path,
+    }
+
+
+def ordinal_day(day):
+    """'17th Nov 2026' style date."""
+    n = day.day
+    suffix = "th" if 11 <= n % 100 <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix} {day:%b %Y}"
+
+
+def email_subject(day):
+    return f"Daily Tickets Resolution & SLA Report - {ordinal_day(day)}"
+
+
+def email_html(parts):
+    """The summary table as an HTML email body (no local file paths)."""
+    cell_style = "padding:4px 8px;border:1px solid #cccccc;"
+    head = "".join(f"<th style='{cell_style}background:#20202c;color:#ffffff;'>{h}</th>"
+                   for h in ["Team", "Sev", "Resolved", "Within SLA", "Resolved late", "Open", "SLA %"])
+    body_rows = []
+    for r in parts["rows"]:
+        if r["Team"] == "Order Fallout" and r["Sev"] == "Sev-1" and not (r["Resolved"] or r["Within"] or r["Late"]):
+            continue
+        pct = "—" if r["SLA"] is None else f"{r['SLA']:.1f}%"
+        bold = "font-weight:bold;" if r["Team"] == "All teams" else ""
+        values = [r["Team"], r["Sev"], r["Resolved"], r["Within"], r["Late"], r["Open"], pct]
+        body_rows.append("<tr>" + "".join(f"<td style='{cell_style}{bold}'>{html.escape(str(v))}</td>"
+                                          for v in values) + "</tr>")
+    return (f"<p><b>{html.escape(parts['title'])}</b><br>{html.escape(parts['as_of'])}</p>"
+            f"<table style='border-collapse:collapse;font-family:Arial;font-size:13px;'>"
+            f"<tr>{head}</tr>{''.join(body_rows)}</table>"
+            "<p>The full ticket list is in the attached Excel file.</p>")
+
+
+def post_eod_report(day=None):
+    day = day or previous_day()
+    parts = build_eod_report(day)
+    url = report_settings.webhook_url()
+    if not url:
+        raise RuntimeError("No Teams workflow link is saved yet")
+    resp = requests.post(url, json=workflow_payload(parts), timeout=60)
+    resp.raise_for_status()
+    print(f"[sla_report] End-of-day report for {day} posted to chat at {datetime.now(REPORT_TZ):%Y-%m-%d %H:%M %Z}")
+
+    email_url = os.environ.get("EOD_EMAIL_FLOW_URL", "").strip()
+    if email_url:
+        with open(parts["path"], "rb") as f:
+            content = base64.b64encode(f.read()).decode("ascii")
+        payload = {
+            "subject": email_subject(day),
+            "body": email_html(parts),
+            "file_name": os.path.basename(parts["path"]),
+            "file_content": content,
+        }
+        resp = requests.post(email_url, json=payload, timeout=120)
+        resp.raise_for_status()
+        print(f"[sla_report] End-of-day email sent for {day}")
+    return True
+
+
+def next_eod(now):
+    """The next 00:00:00 Jira time (America/New_York) after `now`. It reports on the day before."""
+    midnight_today = now.astimezone(breach_logic.JIRA_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+    return midnight_today + timedelta(days=1)
+
+
 class ReportScheduler:
-    """Background loop used by the dashboard: posts at each 2-hour slot while the
-    on/off switch (report_settings) is on. Only one instance should run."""
+    """Background loop used by the dashboard. Posts the 2-hourly report while its
+    switch is on, and the end-of-day report at 00:00:00 Jira time (for the day
+    before) while its switch is on."""
 
     def __init__(self):
         self.status = {"next": None, "last": None, "last_error": None}
+
+    def _record(self, error=None):
+        if error is None:
+            self.status["last"] = datetime.now(REPORT_TZ)
+            self.status["last_error"] = None
+        else:
+            self.status["last_error"] = str(error)
 
     def send_now(self):
         try:
             post_report()
         except Exception as exc:
-            self.status["last_error"] = str(exc)
+            self._record(exc)
             raise
-        self.status["last"] = datetime.now(REPORT_TZ)
-        self.status["last_error"] = None
+        self._record()
+
+    def send_eod_now(self, day=None):
+        try:
+            post_eod_report(day)
+        except Exception as exc:
+            self._record(exc)
+            raise
+        self._record()
 
     def run(self):
         while True:
-            if not report_settings.load()["enabled"]:
+            s = report_settings.load()
+            now = datetime.now(REPORT_TZ)
+            options = []
+            if s["enabled"]:
+                options.append((next_slot(now), "slot"))
+            if s["eod_enabled"]:
+                options.append((next_eod(now), "eod"))
+            if not options:
                 self.status["next"] = None
                 time.sleep(30)
                 continue
-            slot = next_slot(datetime.now(REPORT_TZ))
-            self.status["next"] = slot
-            # Wake up every 30 seconds so a switch change is noticed quickly.
-            while report_settings.load()["enabled"] and datetime.now(REPORT_TZ) < slot:
-                time.sleep(min(30, max(1.0, (slot - datetime.now(REPORT_TZ)).total_seconds())))
-            if not report_settings.load()["enabled"]:
+            when, kind = min(options)
+            self.status["next"] = when
+            # Wake every 30 seconds; re-plan if either switch changes.
+            while datetime.now(REPORT_TZ) < when:
+                cur = report_settings.load()
+                if cur["enabled"] != s["enabled"] or cur["eod_enabled"] != s["eod_enabled"]:
+                    break
+                time.sleep(min(30, max(1.0, (when - datetime.now(REPORT_TZ)).total_seconds())))
+            cur = report_settings.load()
+            still_on = cur["eod_enabled"] if kind == "eod" else cur["enabled"]
+            if datetime.now(REPORT_TZ) < when or not still_on:
                 continue
             try:
-                self.send_now()
+                if kind == "eod":
+                    # Sent at 00:00:00 on the 20th, so the report covers the 19th.
+                    self.send_eod_now(when.date() - timedelta(days=1))
+                else:
+                    self.send_now()
             except Exception as exc:
                 print(f"[sla_report] Report failed: {exc}")
 

@@ -11,7 +11,7 @@ import os
 import threading
 
 PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "report_settings.json")
-DEFAULTS = {"webhook_url": "", "enabled": False}
+DEFAULTS = {"webhook_url": "", "enabled": False, "eod_enabled": False}
 _lock = threading.Lock()
 
 

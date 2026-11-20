@@ -127,6 +127,17 @@ def assignee_table_html(table, teams):
             '· SLA % = within SLA ÷ (within SLA + resolved late)</div>')
 
 
+def inflow_sheets(start, end, resolved):
+    """Excel sheets for the ticket details, split by when each ticket was created:
+    resolved from today's inflow (created the same day) and from past inflow."""
+    def sheet(which):
+        part = ra.ticket_list(ra.by_inflow(resolved, which), start, end)
+        return part.assign(Link=part["Key"].map(jira_url))
+
+    return {"Resolved from Today's Inflow": sheet(ra.INFLOW_SAME_DAY),
+            "Resolved from Past Inflow": sheet(ra.INFLOW_PAST)}
+
+
 def fmt_pct(pct):
     return "—" if pct is None else f"{pct:.0f}%"
 
@@ -227,7 +238,7 @@ with st.container(border=True):
         tickets_part = ra.ticket_list(resolved, start, end)
         return ui.write_excel({
             "Summary": ra.sla_by_severity(resolved, start, end),
-            "Tickets": tickets_part.assign(Link=tickets_part["Key"].map(jira_url)),
+            **inflow_sheets(start, end, resolved),
         })
 
 
@@ -408,7 +419,7 @@ def build_excel():
         "Trend": trend_sheet,
         "SLA by Severity": ra.sla_by_severity(resolved, start, end),
         "By Assignee": assignees if not assignees.empty else pd.DataFrame({"Assignee": []}),
-        "Tickets": tickets.assign(Link=tickets["Key"].map(jira_url)),
+        **inflow_sheets(start, end, resolved),
     })
 
 

@@ -12,6 +12,7 @@ __pycache__/
 *.xlsx
 notified_state.json
 report_settings.json
+reports/
 
 # Local tooling
 .claude/
