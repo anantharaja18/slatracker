@@ -1620,7 +1620,11 @@ def report_scheduler():
     """One scheduler per dashboard process (cache_resource keeps the same object,
     so reruns do not start a second loop)."""
     scheduler = sla_report.ReportScheduler()
-    threading.Thread(target=scheduler.run, name="teams-report", daemon=True).start()
+    if sla_report.claim_scheduler_lock():
+        threading.Thread(target=scheduler.run, name="teams-report", daemon=True).start()
+    else:
+        scheduler.status["last_error"] = ("Another dashboard window is running the report schedule, "
+                                          "so this one does not post automatically.")
     return scheduler
 
 

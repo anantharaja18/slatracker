@@ -17,6 +17,7 @@ import argparse
 import base64
 import html
 import os
+import socket
 import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -395,6 +396,26 @@ def next_eod(now):
     """The next 00:00:00 Jira time (America/New_York) after `now`. It reports on the day before."""
     midnight_today = now.astimezone(breach_logic.JIRA_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
     return midnight_today + timedelta(days=1)
+
+
+SCHEDULER_LOCK_PORT = 47613  # any free local port; only one dashboard process can hold it
+_scheduler_lock = None
+
+
+def claim_scheduler_lock():
+    """True if this process now owns the report schedule. Only one dashboard
+    process may run it, so a second open dashboard can't post the same report."""
+    global _scheduler_lock
+    if _scheduler_lock is not None:
+        return True
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", SCHEDULER_LOCK_PORT))
+    except OSError:
+        sock.close()
+        return False
+    _scheduler_lock = sock  # keep it open for the life of this process
+    return True
 
 
 class ReportScheduler:

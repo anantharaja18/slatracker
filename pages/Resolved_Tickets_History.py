@@ -161,7 +161,13 @@ head_r = ui.page_header(
 with head_r:
     force = st.button("🔄  Sync with Jira now", width="stretch")
 
+# Show the loading line from the very start of a page's first load (the sync
+# check below can take a while); later reruns, such as auto-refresh, stay quiet.
+first_load = not st.session_state.get("resolved_page_loaded")
+boot = ui.loading("Loading resolved tickets&hellip; checking the Jira sync") if first_load else st.empty()
 ui.ensure_fresh(force=force)
+boot.empty()
+st.session_state["resolved_page_loaded"] = True
 last_sync = trend_store.last_sync_time()
 data_loader = ui.loading_if_new("resolved_loaded_sync", last_sync.isoformat() if last_sync else None,
                                 "Loading resolved tickets&hellip; a year of Retail, SAC, B2B and Order Fallout")
