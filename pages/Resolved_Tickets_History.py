@@ -23,11 +23,11 @@ import trend_analysis as ta
 import trend_store
 import ui_common as ui
 import ui_table
+from sla_views import (TEAM_COLOR, count_cell, pct_color, sla_cell, sla_severity_html,
+                       severity_png)
 from ui_common import (ACCENT_FROM, ACCENT_TO, COLOR_CRITICAL, COLOR_GOOD, COLOR_WARNING, HEADER_BG, SURFACE_CARD,
                        SURFACE_PANEL, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY, jira_url)
 
-# Same team colors as the dashboard.
-TEAM_COLOR = {"Retail": "#3987e5", "SAC": "#d95926", "B2B": "#199e70", "Order Fallout": "#c98500"}
 ALL_COLOR = "#9085e9"
 
 st.set_page_config(page_title="Resolved Tickets History", page_icon="✅", layout="wide")
@@ -85,16 +85,6 @@ def initials(name):
     return ((parts[0][0] + (parts[-1][0] if len(parts) > 1 else "")) if parts else "?").upper()
 
 
-def sla_cell(pct):
-    """SLA % as a green / amber / red pill (dashboard thresholds) plus a bar."""
-    if pct is None or pd.isna(pct):
-        return '<span class="asg-zero">—</span>'
-    color = pct_color(pct)
-    return (f'<span class="asg-sla"><span class="asg-slabar"><span style="width:{min(pct, 100):.0f}%;'
-            f'background:{color};"></span></span><span class="asg-pill" style="color:{color};'
-            f'border-color:{color}66;background:{color}1f;">{pct:.1f}%</span></span>')
-
-
 def assignee_table_html(table, teams):
     """The Resolved-by-assignee table (ra.by_assignee output, Grand Total last)."""
     rows, total = table.iloc[:-1], table.iloc[-1]
@@ -135,13 +125,6 @@ def assignee_table_html(table, teams):
             f'<div class="asg-legend">SLA %: <b style="color:{COLOR_GOOD};">90% and above</b> · '
             f'<b style="color:{COLOR_WARNING};">70 – 89%</b> · <b style="color:{COLOR_CRITICAL};">below 70%</b> '
             '· SLA % = within SLA ÷ (within SLA + resolved late)</div>')
-
-
-def pct_color(pct):
-    """Same thresholds as the dashboard's SLA %."""
-    if pct is None:
-        return TEXT_MUTED
-    return COLOR_GOOD if pct >= 90 else COLOR_WARNING if pct >= 70 else COLOR_CRITICAL
 
 
 def fmt_pct(pct):
@@ -225,6 +208,48 @@ for col, team in zip(cols, ["All teams", *ra.TEAMS]):
         f'median time to resolve {fmt_hours(s["median_hours"])}</div></div>',
         unsafe_allow_html=True,
     )
+
+# ---------------------------------------------------------------------------
+# SLA by severity
+# ---------------------------------------------------------------------------
+with st.container(border=True):
+    sev_head_title, sev_head_xlsx, sev_head_png = st.columns([3, 1.4, 1.4], vertical_alignment="center")
+    with sev_head_title:
+        st.markdown(f'<div style="font-size:0.95rem;font-weight:700;color:#F5F5F7;padding-top:6px;">Resolved SLA by severity &mdash; {html.escape(label)}</div>', unsafe_allow_html=True)
+    st.markdown(sla_severity_html(ra.sla_by_severity(resolved, start, end)), unsafe_allow_html=True)
+    sla_text = ", ".join(f"{sev} {mins // 60} h" for sev, mins in config.SLA_MINUTES.items())
+    st.caption(f"Within SLA = resolved before Created + the severity's SLA ({sla_text}). "
+               "Tickets with no Sev-1 / Sev-2 are not in this table.")
+
+
+    def build_severity_excel(start=start, end=end, label=label, resolved=resolved):
+        """Excel: Summary (this table) and Tickets (every ticket in the period)."""
+        tickets_part = ra.ticket_list(resolved, start, end)
+        return ui.write_excel({
+            "Summary": ra.sla_by_severity(resolved, start, end),
+            "Tickets": tickets_part.assign(Link=tickets_part["Key"].map(jira_url)),
+        })
+
+
+    def build_severity_png(start=start, end=end, label=label, resolved=resolved):
+        """PNG of the Summary table only."""
+        return severity_png(ra.sla_by_severity(resolved, start, end), f"Resolved SLA by severity — {label}",
+                            f"All dates and times in {breach_logic.jira_time_label()}")
+
+
+    with sev_head_xlsx:
+        st.download_button(
+            "⬇️ Download SLA by severity (Excel)", data=build_severity_excel, on_click="ignore",
+            key="download_sev_xlsx", file_name=f"SLA_By_Severity_{start:%Y-%m-%d}_to_{end:%Y-%m-%d}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            help="Summary sheet (this table) and Tickets sheet (every resolved ticket in the period, with Jira links).",
+        )
+    with sev_head_png:
+        st.download_button(
+            "🖼️ Download SLA summary (PNG)", data=build_severity_png, on_click="ignore",
+            key="download_sev_png", file_name=f"SLA_Summary_{start:%Y-%m-%d}_to_{end:%Y-%m-%d}.png",
+            mime="image/png", help="The Summary table as an image.",
+        )
 
 # ---------------------------------------------------------------------------
 # By assignee
@@ -381,6 +406,7 @@ def build_excel():
     return ui.write_excel({
         "Summary": pd.DataFrame(summary_rows),
         "Trend": trend_sheet,
+        "SLA by Severity": ra.sla_by_severity(resolved, start, end),
         "By Assignee": assignees if not assignees.empty else pd.DataFrame({"Assignee": []}),
         "Tickets": tickets.assign(Link=tickets["Key"].map(jira_url)),
     })

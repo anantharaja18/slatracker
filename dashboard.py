@@ -6,6 +6,7 @@ Run with:
 """
 
 import html
+import os
 import itertools
 import io
 from collections import defaultdict
@@ -20,6 +21,11 @@ from streamlit_autorefresh import st_autorefresh
 import config
 import jira_client
 import breach_logic
+import report_settings
+import sla_report
+import sla_views
+import threading
+import ui_common
 import ui_table
 # Jira status dot colors ("Tickets by Status" cards, popups) and severity tag
 # colors are shared with the styled tables.
@@ -504,7 +510,6 @@ def bell_svg(size):
 HEADER_HTML = (
     f'<div class="app-header"><div class="app-logo">{bell_svg(19)}</div><div>'
     f'<div class="app-title">{html.escape(APP_NAME)}</div>'
-    f'<div class="app-subtitle">{html.escape(APP_SUBTITLE)}</div>'
     '</div></div>'
 )
 
@@ -572,7 +577,7 @@ st.markdown(
             50% {{ box-shadow: 0 0 0 7px rgba(219,39,119,0); }}
         }}
         .app-logo svg {{ display: block; }}
-        .app-title {{ font-size: 1.15rem; font-weight: 700; color: {TEXT_PRIMARY}; line-height: 1.1; }}
+        .app-title {{ font-size: 1.15rem; font-weight: 700; color: {TEXT_PRIMARY}; line-height: 1.1; white-space: nowrap; }}
         .app-subtitle {{ font-size: 0.75rem; color: {TEXT_MUTED}; margin-top: 1px; }}
         .app-refreshed {{ font-size: 0.68rem; color: {TEXT_MUTED}; text-align: right; margin-top: 6px; line-height: 1.35; }}
         a.trend-link {{
@@ -607,7 +612,7 @@ st.markdown(
         .overall-stat-value {{ font-size: 1.1rem; font-weight: 700; color: {TEXT_PRIMARY}; line-height: 1.1; }}
         .overall-stat-label {{
             font-size: 0.6rem; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase;
-            color: {TEXT_MUTED}; margin-top: 2px; white-space: nowrap;
+            color: {TEXT_MUTED}; margin-top: 2px; white-space: normal; line-height: 1.25;
         }}
         .overall-divider {{ width: 1px; height: 28px; background: rgba(255,255,255,0.12); }}
 
@@ -774,7 +779,7 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-st.markdown(f"<style>{ui_table.TABLE_CSS}</style>", unsafe_allow_html=True)
+st.markdown(f"<style>{ui_table.TABLE_CSS}{sla_views.CSS}</style>", unsafe_allow_html=True)
 st.html(POPUP_SCRIPT, unsafe_allow_javascript=True)
 
 ESCALATION_PATH_FIELD = "customfield_10883"
@@ -971,6 +976,80 @@ def compute_resolved_counts(df):
     return {"within_sla": within_sla, "breached": breached, "pct": pct}
 
 
+def resolved_sla_frame(resolved_data, resolved_errors, open_buckets):
+    """Today's SLA by team and severity, in the Resolved History layout:
+    resolved today (created today) plus open tickets that breached today.
+    SLA % = within / (within + resolved late + open breached), as Today SLA.
+    Returns (summary, resolved tickets, open breached tickets). "All teams"
+    counts each ticket once."""
+    frames = [todays_inflow_resolved(df).assign(Team=category)
+              for category, df in resolved_data.items()
+              if category not in resolved_errors and not df.empty]
+    resolved_all = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(
+        columns=["Team", "Key", "Summary", "Severity", "Status", "Assignee", "Resolved Status", "Due Datetime"])
+    open_keys = ["Team", "key", "summary", "severity", "status", "assignee", "due"]
+    open_rows = [{**t, "Team": category} for category, bucket in open_buckets.items()
+                 for t in bucket[BUCKET_BREACHED_TODAY]["tickets"]]
+    open_all = pd.DataFrame(open_rows, columns=open_keys).rename(columns={
+        "key": "Key", "summary": "Summary", "severity": "Severity", "status": "Status",
+        "assignee": "Assignee", "due": "Due"})
+
+    rows = []
+    for team in [*config.CATEGORIES, "All teams"]:
+        if team == "All teams":
+            res_part, open_part = resolved_all.drop_duplicates("Key"), open_all.drop_duplicates("Key")
+        else:
+            res_part = resolved_all[resolved_all["Team"] == team]
+            open_part = open_all[open_all["Team"] == team]
+        row = {"Team": team}
+        for sev in config.SLA_MINUTES:
+            res_sev = res_part[res_part["Severity"] == sev]
+            open_sev = open_part[open_part["Severity"] == sev]
+            counts = compute_resolved_counts(res_sev)
+            within, late, open_n = counts["within_sla"], counts["breached"], len(open_sev)
+            judged = within + late + open_n
+            row[f"{sev} Resolved"] = len(res_sev)
+            row[f"{sev} Within SLA"] = within
+            row[f"{sev} Resolved late"] = late
+            row[f"{sev} Open breached"] = open_n
+            row[f"{sev} SLA %"] = round(within / judged * 100, 1) if judged else None
+        rows.append(row)
+    return pd.DataFrame(rows), resolved_all, open_all
+
+
+def resolved_ticket_sheet(resolved_all, open_all):
+    """Every ticket behind the severity summary (resolved today, then open
+    breached today), with Jira links."""
+    labels = {breach_logic.STATUS_OK: "Within SLA", breach_logic.STATUS_BREACHED: "Resolved late"}
+
+    def due_text(value):
+        return "" if value is None or pd.isna(value) else value.strftime("%Y-%m-%d %H:%M")
+
+    resolved = pd.DataFrame({
+        "Team": resolved_all["Team"].values,
+        "Key": resolved_all["Key"].values,
+        "Summary": resolved_all["Summary"].values,
+        "Severity": resolved_all["Severity"].values,
+        "Status": resolved_all["Status"].values,
+        "Assignee": resolved_all["Assignee"].values,
+        "SLA": resolved_all["Resolved Status"].map(labels).fillna("No SLA (severity not set)").values,
+        "SLA Due": resolved_all["Due Datetime"].map(due_text).values,
+    })
+    still_open = pd.DataFrame({
+        "Team": open_all["Team"].values,
+        "Key": open_all["Key"].values,
+        "Summary": open_all["Summary"].values,
+        "Severity": open_all["Severity"].values,
+        "Status": open_all["Status"].values,
+        "Assignee": open_all["Assignee"].values,
+        "SLA": ["Open, breached"] * len(open_all),
+        "SLA Due": open_all["Due"].values,
+    })
+    sheet = pd.concat([resolved, still_open], ignore_index=True)
+    sheet["Link"] = sheet["Key"].map(ui_common.jira_url)
+    return sheet
+
+
 def sla_pct_color(pct):
     if pct is None:
         return TEXT_MUTED
@@ -1121,7 +1200,7 @@ for category, df in inflow_data.items():
     overall_inflow_keys.update(df["Key"])
 overall_inflow_display = "—" if inflow_errors and not inflow_data else len(overall_inflow_keys)
 
-header_col1, header_col2, header_col3 = st.columns([2.5, 3.9, 1.3])
+header_col1, header_col2, refresh_col, header_col3 = st.columns([3.2, 4.6, 1.3, 1.5])
 with header_col1:
     st.markdown(
         HEADER_HTML,
@@ -1148,10 +1227,11 @@ with header_col2:
         '</div>',
         unsafe_allow_html=True,
     )
-with header_col3:
+with refresh_col:
     if st.button("🔄  Refresh now", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
+with header_col3:
     # pages/Ticket_Trend_Analysis.py and pages/Resolved_Tickets_History.py,
     # each opened in its own browser tab.
     st.markdown(
@@ -1169,13 +1249,15 @@ with header_col3:
 
 st.markdown('<div class="header-spacer"></div>', unsafe_allow_html=True)
 
+
 # ---------------------------------------------------------------------------
 # Section: Total Open Tickets  |  Total Resolved Tickets - Today
 # ---------------------------------------------------------------------------
 open_section, resolved_section = st.columns(2, gap="large")
 
 with open_section:
-    st.markdown('<div class="section-title">Total Open Tickets &amp; Inflow &mdash; Today</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="section-title">Total Open Tickets &amp; Inflow &mdash; Today &mdash; '
+                f'{breach_logic.jira_now():%d %b %Y}</div>', unsafe_allow_html=True)
     cols = st.columns(len(config.CATEGORIES))
     for col, category in zip(cols, config.CATEGORIES.keys()):
         if category in inflow_errors:
@@ -1213,7 +1295,8 @@ with open_section:
 with resolved_section:
     st.markdown(
         section_title_with_download(
-            "Total Resolved Tickets &mdash; Today's Inflow", RESOLVED_BREACHED_GROUP,
+            f"Total Resolved Tickets &mdash; Today's Inflow &mdash; {breach_logic.jira_now():%d %b %Y}",
+            RESOLVED_BREACHED_GROUP,
             "Download breached", "Breached_todays_inflow_all_teams",
         ),
         unsafe_allow_html=True,
@@ -1280,6 +1363,43 @@ with resolved_section:
             f'<div class="bucket-card summary-card"><div class="bucket-card-head">{category}</div>{rows_html}</div>',
             unsafe_allow_html=True,
         )
+
+# ---------------------------------------------------------------------------
+# Section: Resolved SLA by Severity (full width, below the two sections above)
+# ---------------------------------------------------------------------------
+sev_summary, sev_resolved, sev_open = resolved_sla_frame(resolved_data, resolved_errors, open_buckets)
+with st.container(border=True):
+    sev_title, sev_xlsx, sev_png = st.columns([3, 1.4, 1.4], vertical_alignment="center")
+    with sev_title:
+        st.markdown("<div style=\"font-size:0.95rem;font-weight:700;color:#F5F5F7;padding-top:6px;\">"
+                    f"SLA by Severity &mdash; Today's Inflow &mdash; {breach_logic.jira_now():%d %b %Y}</div>",
+                    unsafe_allow_html=True)
+    with sev_xlsx:
+        st.download_button(
+            "⬇️ Download SLA by severity (Excel)",
+            data=lambda s=sev_summary, r=sev_resolved, o=sev_open: ui_common.write_excel({
+                "Summary": s,
+                "Ticket Details": resolved_ticket_sheet(r, o),
+            }),
+            on_click="ignore", key="dash_sev_xlsx",
+            file_name=f"Resolved_SLA_By_Severity_{breach_logic.jira_now():%Y-%m-%d}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            help="Summary sheet (this table) and Ticket Details sheet (resolved-today and open breached tickets, with Jira links).",
+        )
+    with sev_png:
+        st.download_button(
+            "🖼️ Download SLA summary (PNG)",
+            data=lambda s=sev_summary: sla_views.severity_png(
+                s, f"SLA by Severity — Today's Inflow — {breach_logic.jira_now():%d %b %Y}",
+                f"All dates and times in {breach_logic.jira_time_label()}"),
+            on_click="ignore", key="dash_sev_png",
+            file_name=f"Resolved_SLA_Summary_{breach_logic.jira_now():%Y-%m-%d}.png",
+            mime="image/png", help="The Summary table as an image.",
+        )
+    st.markdown(sla_views.sla_severity_html(sev_summary), unsafe_allow_html=True)
+    st.caption(f"Within SLA = resolved before Created + the severity's SLA "
+               f"({', '.join(f'{s} {m // 60} h' for s, m in config.SLA_MINUTES.items())}). "
+               "SLA % = within ÷ (within + resolved late + open breached), the same rule as Today SLA.")
 
 # ---------------------------------------------------------------------------
 # Section: Time to Resolve - Open Tickets
@@ -1491,3 +1611,65 @@ else:
         file_name=f"Productivity_Report_{datetime.now().strftime('%Y-%m-%d')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+# ---------------------------------------------------------------------------
+# Teams report settings: at the bottom, collapsed, unlocked with an admin PIN
+# ---------------------------------------------------------------------------
+@st.cache_resource(show_spinner=False)
+def report_scheduler():
+    """One scheduler per dashboard process (cache_resource keeps the same object,
+    so reruns do not start a second loop)."""
+    scheduler = sla_report.ReportScheduler()
+    threading.Thread(target=scheduler.run, name="teams-report", daemon=True).start()
+    return scheduler
+
+
+scheduler = report_scheduler()
+REPORT_PIN = os.environ.get("REPORT_PANEL_PIN", "").strip()
+
+
+def save_link_from_box():
+    """Runs when the link box is submitted (Enter or leaving the box)."""
+    link = st.session_state.get("report_link", "").strip()
+    if link:
+        report_settings.save({**report_settings.load(), "webhook_url": link})
+with st.expander("Teams report settings (admin)"):
+    if REPORT_PIN and not st.session_state.get("report_unlocked"):
+        st.caption("Enter the admin PIN to view and change the report settings.")
+        pin = st.text_input("PIN", type="password", key="report_pin")
+        if st.button("Unlock", key="report_unlock"):
+            if pin == REPORT_PIN:
+                st.session_state["report_unlocked"] = True
+                st.rerun()
+            st.error("Wrong PIN")
+    else:
+        if REPORT_PIN and st.button("Lock settings", key="report_lock"):
+            st.session_state["report_unlocked"] = False
+            st.rerun()
+        if not REPORT_PIN:
+            st.warning("No REPORT_PANEL_PIN is set in .env, so anyone who can open the dashboard can change these settings.")
+        saved = report_settings.load()
+        status = scheduler.status
+        link = saved["webhook_url"]
+        st.caption("Workflow link: " + (f"saved (ends …{link[-6:]})" if link else "not saved yet"))
+        new_link = st.text_input("Paste the Teams workflow webhook link", type="password", key="report_link",
+                                 on_change=save_link_from_box)
+        if st.button("Save link", key="report_save_link"):
+            if new_link.strip():
+                report_settings.save({**saved, "webhook_url": new_link.strip()})
+                st.success("Link saved")
+            else:
+                st.warning("Paste the link first")
+        enabled = st.toggle("Send a report every 2 hours", value=saved["enabled"], key="report_enabled")
+        if enabled != saved["enabled"]:
+            report_settings.save({**report_settings.load(), "enabled": enabled})
+        if st.button("Send now", key="report_send_now"):
+            try:
+                scheduler.send_now()
+                st.success("Report sent to IM Chat")
+            except Exception as exc:
+                st.error(f"Not sent: {exc}")
+        next_text = f"{status['next']:%d %b %H:%M %Z}" if status["next"] and enabled else "off"
+        last_text = f"{status['last']:%d %b %H:%M %Z}" if status["last"] else "none yet"
+        st.caption(f"Next report: {next_text} · Last report: {last_text}"
+                   + (f" · Last error: {status['last_error']}" if status["last_error"] else ""))

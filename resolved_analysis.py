@@ -86,6 +86,23 @@ def team_summary(df, start, end, prev_range):
     return out
 
 
+def sla_by_severity(df, start, end):
+    """Per team and per severity (the keys of config.SLA_MINUTES, e.g. Sev-1 and
+    Sev-2): resolved, within SLA, resolved late and SLA %. "All teams" counts
+    each ticket once. Tickets with no matching severity are not in these columns."""
+    cur = in_period(df, start, end)
+    rows = []
+    for team in [*TEAMS, "All teams"]:
+        part = cur.drop_duplicates("key") if team == "All teams" else cur[cur["category"] == team]
+        row = {"Team": team}
+        for sev in config.SLA_MINUTES:
+            c = _counts(part[part["severity"] == sev])
+            row.update({f"{sev} Resolved": c["resolved"], f"{sev} Within SLA": c["within"],
+                        f"{sev} Resolved late": c["late"], f"{sev} SLA %": c["pct"]})
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
 def trend(df, first, last, by):
     """Resolved / within / late / SLA % per team per day or per Sunday-Saturday
     week, for every bucket in [first, last] (empty ones included)."""
