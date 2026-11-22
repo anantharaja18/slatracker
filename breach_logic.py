@@ -70,6 +70,34 @@ def _extract_option_value(raw):
     return raw
 
 
+JIRA_SLA_FIELD = "customfield_10031"  # Jira's "Time to resolution" SLA (Jira Service Management)
+
+
+def _sla_cycle(issue):
+    """(cycle, ended) from Jira's own SLA, or None. ended=True for a finished cycle
+    (resolved ticket), False for the cycle still running (open ticket)."""
+    raw = jira_client.get_field_value(issue, JIRA_SLA_FIELD)
+    if not isinstance(raw, dict):
+        return None
+    if raw.get("ongoingCycle"):
+        return raw["ongoingCycle"], False
+    completed = raw.get("completedCycles") or []
+    if completed:
+        return completed[-1], True
+    return None
+
+
+def _remaining_ms(cycle, ended):
+    """Time left on Jira's SLA in milliseconds (negative = past the goal).
+    Jira's remainingTime = goal - elapsed, so pauses are already taken out."""
+    remaining = (cycle.get("remainingTime") or {}).get("millis")
+    if remaining is None and not ended:
+        breach_dt = _parse_datetime((cycle.get("breachTime") or {}).get("jira"))
+        if breach_dt is not None:
+            remaining = (breach_dt - datetime.now(timezone.utc)).total_seconds() * 1000
+    return remaining
+
+
 def evaluate(issue: dict, category_config: dict):
     """
     Returns a dict: {status, due_date, hours_remaining, severity} for one issue.
@@ -101,6 +129,22 @@ def evaluate(issue: dict, category_config: dict):
         due_dt = None
     else:
         due_dt = None
+
+    if breach_type == "sla_from_created":
+        cycle = _sla_cycle(issue)
+        if cycle and not cycle[1]:
+            remaining = _remaining_ms(*cycle)
+            if remaining is not None:
+                hours = remaining / 3600000.0
+                if hours < 0:
+                    status = STATUS_BREACHED
+                elif hours <= category_config["warn_hours"]:
+                    status = STATUS_WARNING
+                else:
+                    status = STATUS_OK
+                due_dt = _parse_datetime((cycle[0].get("breachTime") or {}).get("jira"))
+                return {"status": status, "due_date": due_dt, "hours_remaining": round(hours, 1),
+                        "severity": severity}
 
     if due_dt is None:
         return {"status": STATUS_UNKNOWN, "due_date": None, "hours_remaining": None, "severity": severity}
@@ -135,6 +179,14 @@ def evaluate_resolution(issue: dict, category_config: dict):
 
     resolved_raw = jira_client.get_field_value(issue, "resolutiondate")
     resolved_dt = _parse_datetime(resolved_raw)
+
+    cycle = _sla_cycle(issue)
+    if cycle and cycle[1]:
+        remaining = _remaining_ms(*cycle)
+        if remaining is not None:
+            status = STATUS_OK if remaining >= 0 else STATUS_BREACHED
+            due_dt = created_dt + timedelta(minutes=sla_minutes) if created_dt and sla_minutes else None
+            return {"status": status, "due_date": due_dt, "resolved_date": resolved_dt, "severity": severity}
 
     if created_dt is None or sla_minutes is None or resolved_dt is None:
         return {"status": STATUS_UNKNOWN, "due_date": None, "resolved_date": resolved_dt, "severity": severity}

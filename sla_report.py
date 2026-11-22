@@ -34,8 +34,9 @@ REPORT_TZ = ZoneInfo("America/Puerto_Rico")
 SLOT_HOURS = list(range(8, 23, 2))  # 08:00, 10:00, ..., 22:00 Puerto Rico time
 BUCKET_BREACHED_TODAY = "Breached Today"  # same meaning as in dashboard.py
 
-RESOLVED_FIELDS = ["summary", "status", "assignee", "created", "resolutiondate", config.SEVERITY_FIELD]
-OPEN_FIELDS = ["summary", "status", "assignee", "created", config.SEVERITY_FIELD]
+RESOLVED_FIELDS = ["summary", "status", "assignee", "created", "resolutiondate", config.SEVERITY_FIELD,
+                   breach_logic.JIRA_SLA_FIELD]
+OPEN_FIELDS = ["summary", "status", "assignee", "created", config.SEVERITY_FIELD, breach_logic.JIRA_SLA_FIELD]
 
 
 def fetch_resolved_today():
@@ -246,7 +247,8 @@ def next_slot(now):
     return tomorrow.replace(hour=SLOT_HOURS[0], minute=0, second=0, microsecond=0)
 
 
-EOD_FIELDS = ["summary", "status", "assignee", "created", "resolutiondate", config.SEVERITY_FIELD]
+EOD_FIELDS = ["summary", "status", "assignee", "created", "resolutiondate", config.SEVERITY_FIELD,
+              breach_logic.JIRA_SLA_FIELD]
 REPORTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports")
 
 

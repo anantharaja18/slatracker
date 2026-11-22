@@ -815,7 +815,7 @@ def extract_linked_issues(fields):
 
 @st.cache_data(ttl=AUTO_REFRESH_SECONDS, show_spinner=False)  # a spinner per load pushes the page down -> visible shaking
 def load_category_data(category, cat_config):
-    fields = ["summary", "status", "assignee", "priority", "created", "issuelinks",
+    fields = ["summary", "status", "assignee", "priority", "created", "issuelinks", breach_logic.JIRA_SLA_FIELD,
               ESCALATION_PATH_FIELD, ESCALATION_PATH_OTHER_FIELD]
     if cat_config["breach_type"] == "sla_from_created":
         fields.append(cat_config["severity_field"])
@@ -847,7 +847,7 @@ def load_category_data(category, cat_config):
 
 @st.cache_data(ttl=AUTO_REFRESH_SECONDS, show_spinner=False)  # a spinner per load pushes the page down -> visible shaking
 def load_resolved_data(category, cat_config):
-    fields = ["summary", "status", "assignee", "created", "resolutiondate", cat_config["severity_field"]]
+    fields = ["summary", "status", "assignee", "created", "resolutiondate", cat_config["severity_field"], breach_logic.JIRA_SLA_FIELD]
     issues = jira_client.search_issues(cat_config["resolved_jql"], fields=fields)
 
     rows = []

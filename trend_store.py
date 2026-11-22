@@ -207,7 +207,8 @@ def _weekly_windows(start, end):
 # Resolved tickets (Resolved History page): the dashboard teams' resolved
 # scopes, with SLA judged exactly like the dashboard's resolved cards.
 # ---------------------------------------------------------------------------
-RESOLVED_FIELDS = ["summary", "status", "assignee", "priority", "created", "resolutiondate", config.SEVERITY_FIELD]
+RESOLVED_FIELDS = ["summary", "status", "assignee", "priority", "created", "resolutiondate", config.SEVERITY_FIELD,
+                   breach_logic.JIRA_SLA_FIELD]
 RESOLVED_SCOPE = json.dumps({
     "categories": {c: cfg["resolved_scope_jql"] for c, cfg in config.CATEGORIES.items()},
     "sla": config.SLA_MINUTES, "fields": RESOLVED_FIELDS, "history_days": config.TREND_HISTORY_DAYS,
