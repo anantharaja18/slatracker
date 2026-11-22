@@ -90,12 +90,32 @@ def _sla_cycle(issue):
 def _remaining_ms(cycle, ended):
     """Time left on Jira's SLA in milliseconds (negative = past the goal).
     Jira's remainingTime = goal - elapsed, so pauses are already taken out."""
+    goal = (cycle.get("goalDuration") or {}).get("millis")
+    elapsed = (cycle.get("elapsedTime") or {}).get("millis")
+    if not ended and cycle.get("paused") and goal is not None and elapsed is not None:
+        # Clock stopped (e.g. waiting for customer): the time left is frozen at goal - elapsed.
+        return goal - elapsed
     remaining = (cycle.get("remainingTime") or {}).get("millis")
     if remaining is None and not ended:
         breach_dt = _parse_datetime((cycle.get("breachTime") or {}).get("jira"))
         if breach_dt is not None:
             remaining = (breach_dt - datetime.now(timezone.utc)).total_seconds() * 1000
     return remaining
+
+
+def _resolved_open_cycle_remaining_ms(cycle, resolved_dt):
+    """Remaining SLA time (ms) as it stood when the ticket was resolved, for a resolved
+    ticket whose Jira cycle is still running. A paused cycle stopped at its elapsed
+    value. An un-paused cycle is assumed to have run on since resolution, so the time
+    after resolution is taken back off. Returns None if the numbers are missing."""
+    goal = (cycle.get("goalDuration") or {}).get("millis")
+    elapsed = (cycle.get("elapsedTime") or {}).get("millis")
+    if goal is None or elapsed is None:
+        return _remaining_ms(cycle, False)
+    if not cycle.get("paused") and resolved_dt is not None:
+        since = (datetime.now(timezone.utc) - resolved_dt).total_seconds() * 1000
+        elapsed = max(0, elapsed - max(0, since))
+    return goal - elapsed
 
 
 def evaluate(issue: dict, category_config: dict):
@@ -142,7 +162,11 @@ def evaluate(issue: dict, category_config: dict):
                     status = STATUS_WARNING
                 else:
                     status = STATUS_OK
-                due_dt = _parse_datetime((cycle[0].get("breachTime") or {}).get("jira"))
+                if cycle[0].get("paused"):
+                    # Jira's breach time is stale while the clock is stopped; project from now.
+                    due_dt = datetime.now(timezone.utc) + timedelta(milliseconds=remaining)
+                else:
+                    due_dt = _parse_datetime((cycle[0].get("breachTime") or {}).get("jira"))
                 return {"status": status, "due_date": due_dt, "hours_remaining": round(hours, 1),
                         "severity": severity}
 
@@ -180,7 +204,17 @@ def evaluate_resolution(issue: dict, category_config: dict):
     resolved_raw = jira_client.get_field_value(issue, "resolutiondate")
     resolved_dt = _parse_datetime(resolved_raw)
 
+    # Jira keeps the SLA cycle open (paused) when a resolved ticket is reopened and
+    # closed again, so a running cycle is still the answer: its remaining time says
+    # whether the time already spent was within the goal.
     cycle = _sla_cycle(issue)
+    if cycle and not cycle[1]:
+        remaining = _resolved_open_cycle_remaining_ms(cycle[0], resolved_dt)
+        if remaining is not None:
+            status = STATUS_OK if remaining >= 0 else STATUS_BREACHED
+            due_dt = created_dt + timedelta(minutes=sla_minutes) if created_dt and sla_minutes else None
+            return {"status": status, "due_date": due_dt, "resolved_date": resolved_dt, "severity": severity}
+
     if cycle and cycle[1]:
         remaining = _remaining_ms(*cycle)
         if remaining is not None:
