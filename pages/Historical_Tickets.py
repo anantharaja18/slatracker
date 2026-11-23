@@ -9,7 +9,7 @@ Data comes from the local cache kept by trend_store.py.
 """
 
 import html
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import altair as alt
 import pandas as pd
@@ -22,6 +22,8 @@ import resolved_analysis as ra
 import trend_analysis as ta
 import trend_store
 import ui_common as ui
+import popup_ui
+import sla_comments_ui
 import ui_table
 from sla_views import (TEAM_COLOR, count_cell, pct_color, sla_cell, sla_severity_html,
                        severity_png)
@@ -30,8 +32,9 @@ from ui_common import (ACCENT_FROM, ACCENT_TO, COLOR_CRITICAL, COLOR_GOOD, COLOR
 
 ALL_COLOR = "#9085e9"
 
-st.set_page_config(page_title="Resolved Tickets History", page_icon="✅", layout="wide")
-st_autorefresh(interval=5 * 60 * 1000, key="resolved_autorefresh")
+st.set_page_config(page_title="Historical Tickets", page_icon="✅", layout="wide")
+if not sla_comments_ui.comments_open("hist"):  # paused while the comments dialog is open
+    st_autorefresh(interval=5 * 60 * 1000, key="resolved_autorefresh")
 ui.apply_css(f"""
     .kpi-row {{ display: flex; gap: 14px; align-items: baseline; flex-wrap: wrap; }}
     .kpi-pct {{ font-size: 1.15rem; font-weight: 700; }}
@@ -155,8 +158,13 @@ def load_data(sync_stamp):
     return ra.load_resolved()
 
 
+@st.cache_data(ttl=300, show_spinner=False)  # live from Jira: open tickets breached right now
+def load_open_breached():
+    return ra.load_open_breached()
+
+
 head_r = ui.page_header(
-    "Resolved Tickets History", "Resolved tickets and SLA for Retail, SAC, B2B and Order Fallout — any day, week or range",
+    "Historical Tickets", "Resolved tickets and SLA for Retail, SAC, B2B and Order Fallout — any day, week or range",
     '<path d="M20 6L9 17l-5-5"/>')
 with head_r:
     force = st.button("🔄  Sync with Jira now", width="stretch")
@@ -207,8 +215,14 @@ with period["extra_col"]:
 # ---------------------------------------------------------------------------
 # Summary tiles
 # ---------------------------------------------------------------------------
-summary = ra.team_summary(resolved, start, end, period["prev_range"])
-st.markdown(f'<div class="section-title">Resolved tickets &mdash; {html.escape(label)}</div>', unsafe_allow_html=True)
+# Open tickets breached right now come live from Jira (cached 5 minutes): show a loading line while that runs.
+now = datetime.now()
+open_loader = ui.loading_if_new("historical_open_breached", f"{now:%Y%m%d%H}{now.minute // 5}",
+                                "Loading open tickets from Jira&hellip; checking which are breached now")
+open_rows = load_open_breached()
+ui.done_loading(open_loader)
+summary = ra.created_summary(resolved, open_rows, start, end, period["prev_range"])
+st.markdown(f'<div class="section-title">Tickets created &mdash; {html.escape(label)}</div>', unsafe_allow_html=True)
 cols = st.columns(len(ra.TEAMS) + 1)
 for col, team in zip(cols, ["All teams", *ra.TEAMS]):
     s = summary[team]
@@ -216,13 +230,12 @@ for col, team in zip(cols, ["All teams", *ra.TEAMS]):
     col.markdown(
         f'<div class="kpi" style="--cat:{color};"><div class="kpi-label">{team}</div>'
         f'<div class="kpi-row"><span class="kpi-value">{s["resolved"]:,}</span>'
-        f'<span class="kpi-pct" style="color:{pct_color(s["pct"])};" title="Within SLA / (Within SLA + Resolved late)">'
+        f'<span class="kpi-pct" style="color:{pct_color(s["pct"])};" title="Within SLA / (Within SLA + Breached SLA)">'
         f'{fmt_pct(s["pct"])} SLA</span></div>'
         f'<div class="kpi-sub">{ui.delta_html(s["resolved"], s["prev"]["resolved"], higher_is_good=True)} vs '
         f'{prev_label} ({s["prev"]["resolved"]:,}, SLA {fmt_pct(s["prev"]["pct"])})</div>'
-        f'<div class="kpi-split">{s["within"]:,} within SLA · {s["late"]:,} resolved late · '
-        f'{s["not_judged"]:,} no SLA · {s["same_day"]:,} created &amp; resolved same day · '
-        f'median time to resolve {fmt_hours(s["median_hours"])}</div></div>',
+        f'<div class="kpi-split">{s["within"]:,} Within SLA · {s["breached"]:,} Breached SLA '
+        f'({s["late"]:,} resolved late + {s["open_breached"]:,} open breached)</div></div>',
         unsafe_allow_html=True,
     )
 
@@ -232,25 +245,37 @@ for col, team in zip(cols, ["All teams", *ra.TEAMS]):
 with st.container(border=True):
     sev_head_title, sev_head_xlsx, sev_head_png = st.columns([3, 1.4, 1.4], vertical_alignment="center")
     with sev_head_title:
-        st.markdown(f'<div style="font-size:0.95rem;font-weight:700;color:#F5F5F7;padding-top:6px;">Resolved SLA by severity &mdash; {html.escape(label)}</div>', unsafe_allow_html=True)
-    st.markdown(sla_severity_html(ra.sla_by_severity(resolved, start, end)), unsafe_allow_html=True)
+        st.markdown(f'<div style="font-size:0.95rem;font-weight:700;color:#F5F5F7;padding-top:6px;">SLA by severity, tickets created &mdash; {html.escape(label)}</div>', unsafe_allow_html=True)
+    st.markdown(f"<style>{popup_ui.POPUP_CSS}</style>", unsafe_allow_html=True)
+    st.html(popup_ui.POPUP_SCRIPT, unsafe_allow_javascript=True)
+
+    def breached_popup(team, sev, count_html, count):
+        """Hover popup on a Breached SLA count: the tickets behind it, with key, severity,
+        assignee and status."""
+        tickets = ra.breached_tickets(resolved, open_rows, start, end, team, sev)
+        return popup_ui.popup_row(count_html, popup_ui.bucket_popup_html(tickets),
+                                  f"{team} — {sev} Breached SLA ({count})", row_class="asg-popup-cell")
+
+    st.markdown(sla_severity_html(ra.sla_by_created(resolved, open_rows, start, end), wrap_breached=breached_popup),
+                unsafe_allow_html=True)
     sla_text = ", ".join(f"{sev} {mins // 60} h" for sev, mins in config.SLA_MINUTES.items())
-    st.caption(f"Within SLA = resolved before Created + the severity's SLA ({sla_text}). "
-               "Tickets with no Sev-1 / Sev-2 are not in this table.")
+    st.caption(f"Tickets created in the period. Resolved = resolved before Created + the severity's SLA ({sla_text}); "
+               "open = still open and breached now. Breached SLA = resolved late + open breached. "
+               "Open tickets not yet breached, and tickets with no Sev-1 / Sev-2, are not in SLA %.")
 
 
-    def build_severity_excel(start=start, end=end, label=label, resolved=resolved):
-        """Excel: Summary (this table) and Tickets (every ticket in the period)."""
-        tickets_part = ra.ticket_list(resolved, start, end)
+    def build_severity_excel(start=start, end=end, label=label, resolved=resolved, open_rows=open_rows):
+        """Excel: Summary (this table) and the resolved tickets sheets."""
         return ui.write_excel({
-            "Summary": ra.sla_by_severity(resolved, start, end),
+            "Summary": ra.sla_by_created(resolved, open_rows, start, end),
             **inflow_sheets(start, end, resolved),
         })
 
 
-    def build_severity_png(start=start, end=end, label=label, resolved=resolved):
+    def build_severity_png(start=start, end=end, label=label, resolved=resolved, open_rows=open_rows):
         """PNG of the Summary table only."""
-        return severity_png(ra.sla_by_severity(resolved, start, end), f"Resolved SLA by severity — {label}",
+        return severity_png(ra.sla_by_created(resolved, open_rows, start, end),
+                            f"SLA by severity, tickets created — {label}",
                             f"All dates and times in {breach_logic.jira_time_label()}")
 
 
@@ -267,6 +292,13 @@ with st.container(border=True):
             key="download_sev_png", file_name=f"SLA_Summary_{start:%Y-%m-%d}_to_{end:%Y-%m-%d}.png",
             mime="image/png", help="The Summary table as an image.",
         )
+
+# ---------------------------------------------------------------------------
+# SLA miss comments: every breached ticket in the period (resolved late + open breached)
+# ---------------------------------------------------------------------------
+comment_tickets = [t for sev in config.SLA_MINUTES
+                   for t in ra.breached_tickets(resolved, open_rows, start, end, "All teams", sev)]
+sla_comments_ui.open_comments_button(comment_tickets, "hist", f"💬 SLA miss comments ({len(comment_tickets)} breached)")
 
 # ---------------------------------------------------------------------------
 # By assignee
@@ -411,11 +443,12 @@ st.markdown(ui_table.html_table(shown, max_height=520, kinds={"Created & Resolve
 # ---------------------------------------------------------------------------
 def build_excel():
     summary_rows = [{
-        "Period": label, "Timezone": breach_logic.jira_time_label(), "Team": team, "Resolved": s["resolved"], "Within SLA": s["within"],
-        "Resolved late": s["late"], "No SLA": s["not_judged"], "SLA %": s["pct"],
-        "Created & resolved same day": s["same_day"],
-        "Median hours to resolve": None if s["median_hours"] is None else round(s["median_hours"], 1),
-        "Compared with": prev_label, "Resolved then": s["prev"]["resolved"], "SLA % then": s["prev"]["pct"],
+        "Period": label, "Timezone": breach_logic.jira_time_label(), "Team": team,
+        "Tickets created (resolved)": s["resolved"], "Within SLA": s["within"],
+        "Resolved late": s["late"], "Open breached": s["open_breached"], "Breached SLA": s["breached"],
+        "SLA %": s["pct"],
+        "Compared with": prev_label, "Resolved then": s["prev"]["resolved"], "Breached SLA then": s["prev"]["breached"],
+        "SLA % then": s["prev"]["pct"],
     } for team, s in summary.items()]
     trend_sheet = trend.rename(columns={"label": "Day" if trend_by == "day" else "Week", "category": "Team",
                                         "resolved": "Resolved", "within": "Within SLA", "late": "Resolved late",
@@ -423,7 +456,7 @@ def build_excel():
     return ui.write_excel({
         "Summary": pd.DataFrame(summary_rows),
         "Trend": trend_sheet,
-        "SLA by Severity": ra.sla_by_severity(resolved, start, end),
+        "SLA by Severity": ra.sla_by_created(resolved, open_rows, start, end),
         "By Assignee": assignees if not assignees.empty else pd.DataFrame({"Assignee": []}),
         **inflow_sheets(start, end, resolved),
     })

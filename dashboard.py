@@ -23,10 +23,14 @@ import jira_client
 import breach_logic
 import report_settings
 import sla_report
+import smtp_mail
 import sla_views
 import threading
 import ui_common
 import ui_table
+import sla_comments
+import sla_comments_ui
+from popup_ui import (POPUP_CSS, POPUP_SCRIPT, RESOLVED_BREACHED_GROUP, TTR_BREACHED_GROUP, DOWNLOAD_ICON_SVG, bucket_popup_html, jira_ticket_url, popup_row, section_title_with_download, severity_tag_html, status_dot_color, status_tag_html)
 # Jira status dot colors ("Tickets by Status" cards, popups) and severity tag
 # colors are shared with the styled tables.
 from ui_table import DEFAULT_STATUS_DOT_COLOR, SEVERITY_TAG_COLORS, STATUS_DOT_COLOR
@@ -93,10 +97,6 @@ CATEGORY_COLOR = {
 }
 DEFAULT_CATEGORY_COLOR = "#3987e5"
 
-def status_dot_color(status):
-    return STATUS_DOT_COLOR.get((status or "").strip().lower(), DEFAULT_STATUS_DOT_COLOR)
-
-
 def compute_status_counts(df):
     if df.empty:
         return {}
@@ -141,267 +141,6 @@ def compute_time_buckets(df):
         buckets[b]["count"] += 1
         buckets[b]["tickets"].append(ticket)
     return buckets
-
-
-def jira_ticket_url(key):
-    return f'{config.JIRA_BASE_URL.rstrip("/")}/browse/{key}'
-
-
-def bucket_popup_html(tickets):
-    if not tickets:
-        return '<div class="bucket-popup-inner"><div class="bucket-popup-empty">No tickets</div></div>'
-    # data-* attributes feed the popup's CSV download (see POPUP_SCRIPT).
-    items = "".join(
-        f'<a class="bucket-popup-item" href="{html.escape(jira_ticket_url(t["key"]), quote=True)}" '
-        f'target="_blank" rel="noopener noreferrer" '
-        f'data-key="{html.escape(t["key"], quote=True)}" '
-        f'data-severity="{html.escape(t.get("severity") or "", quote=True)}" '
-        f'data-assignee="{html.escape(t["assignee"], quote=True)}" '
-        f'data-status="{html.escape(t.get("status") or "", quote=True)}" '
-        f'data-due="{html.escape(t.get("due") or "", quote=True)}" '
-        f'data-summary="{html.escape(t.get("summary") or "", quote=True)}">'
-        f'<span class="bucket-popup-key">{html.escape(t["key"])}</span>'
-        f'{severity_tag_html(t.get("severity"))}'
-        f'{status_tag_html(t.get("status"))}'
-        f'<span class="bucket-popup-assignee" title="{html.escape(t["assignee"])}">{html.escape(t["assignee"])}</span></a>'
-        for t in tickets
-    )
-    return f'<div class="bucket-popup-inner">{items}</div>'
-
-
-def status_tag_html(status):
-    """Current Jira status (Escalated, In Progress, ...) as a pill, with the
-    same dot color as the Tickets by Status cards."""
-    if not status:
-        return ""
-    return (
-        f'<span class="bucket-popup-status"><span class="dot" style="background:{status_dot_color(status)};"></span>'
-        f'{html.escape(status)}</span>'
-    )
-
-
-def severity_tag_html(severity):
-    if not severity:
-        return ""
-    bg, fg = SEVERITY_TAG_COLORS.get(severity, (DEFAULT_STATUS_DOT_COLOR, TEXT_PRIMARY))
-    return f'<span class="bucket-popup-tag" style="background:{bg};color:{fg};">{html.escape(severity)}</span>'
-
-
-_popup_counter = itertools.count()
-
-# Export groups for the section-level "Download breached" buttons.
-TTR_BREACHED_GROUP = "ttr-breached"            # Time to Resolve: Breached (Past) + Breached Today
-RESOLVED_BREACHED_GROUP = "resolved-breached"  # Today's inflow: Resolved late + Open, breached
-
-DOWNLOAD_ICON_SVG = (
-    '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" '
-    'stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">'
-    '<path d="M12 4v11"/><path d="M7 10l5 5 5-5"/><path d="M5 20h14"/></svg>'
-)
-
-
-def popup_row(row_inner_html, popup_inner_html, title, row_class="bucket-row", export_group=None):
-    """A bucket row (or other element, via row_class) whose ticket popup opens
-    on hover and closes a few seconds after the pointer leaves it (or via its
-    x). Handled by POPUP_SCRIPT. Popups sharing an export_group are downloaded
-    together by a section_title_with_download() button."""
-    popup_id = f"popup-{next(_popup_counter)}"
-    group_attr = f' data-export-group="{html.escape(export_group, quote=True)}"' if export_group else ""
-    return (
-        f'<div class="popup-wrap" data-popup-id="{popup_id}"{group_attr}>'
-        f'<div class="{row_class} has-popup">{row_inner_html}</div>'
-        f'<div class="bucket-popup"><div class="bucket-popup-box">'
-        f'<div class="bucket-popup-header"><span class="bucket-popup-title">{html.escape(title)}</span>'
-        f'<span class="bucket-popup-actions">'
-        f'<span class="bucket-popup-download" title="Download this list (CSV)">{DOWNLOAD_ICON_SVG}</span>'
-        f'<span class="bucket-popup-close" title="Close">&times;</span></span></div>'
-        f'{popup_inner_html}</div></div>'
-        f'</div>'
-    )
-
-
-def section_title_with_download(title_html, export_group, button_label, file_name):
-    """A section title bar with a button on the right that downloads every
-    popup in export_group as one CSV."""
-    return (
-        f'<div class="section-title section-title-bar"><span>{title_html}</span>'
-        f'<span class="section-download" data-export-group="{html.escape(export_group, quote=True)}" '
-        f'data-file-name="{html.escape(file_name, quote=True)}" title="Download as CSV">'
-        f'{DOWNLOAD_ICON_SVG}<span>{html.escape(button_label)}</span></span></div>'
-    )
-
-
-# Hovering a row briefly opens its popup (closing any other open one); it
-# closes 5 seconds after the pointer leaves the row and popup, or at once when
-# its x is clicked. The open popup's id is remembered so it's
-# re-opened after a Streamlit rerun (e.g. the 1-minute auto-refresh) redraws it.
-POPUP_SCRIPT = """
-<script>
-(function () {
-  const win = window.parent && window.parent.document ? window.parent : window;
-  const doc = win.document;
-  if (win.__slaPopupsInstalled) return;
-  win.__slaPopupsInstalled = true;
-  win.__slaOpenPopup = null;
-
-  function setOpen(id) {
-    win.__slaOpenPopup = id;
-    doc.querySelectorAll(".popup-wrap.open").forEach(function (w) {
-      if (w.dataset.popupId !== id) w.classList.remove("open");
-    });
-    if (id) {
-      const w = doc.querySelector('.popup-wrap[data-popup-id="' + id + '"]');
-      if (w) openWrap(w);
-    }
-  }
-
-  // Shows a popup, flipping it to align with the row's right edge if it
-  // would otherwise run past the right side of the window.
-  function openWrap(w) {
-    w.classList.add("open");
-    const pop = w.querySelector(".bucket-popup");
-    if (!pop) return;
-    pop.classList.remove("align-right");
-    if (pop.getBoundingClientRect().right > doc.documentElement.clientWidth - 8) {
-      pop.classList.add("align-right");
-    }
-  }
-
-  // Row left under the pointer when a popup is closed; it must not instantly
-  // re-open, so it's ignored until the pointer moves off it.
-  let suppressRow = null;
-
-  // A row must be hovered briefly before its popup opens, so sweeping the
-  // mouse across the page doesn't flash popups. Once the pointer leaves the
-  // open row/popup, it closes after a grace period unless the pointer returns.
-  const OPEN_DELAY_MS = 500;
-  const CLOSE_DELAY_MS = 5000;
-  let openTimer = null, pendingId = null, closeTimer = null;
-
-  function cancelOpen() {
-    clearTimeout(openTimer);
-    openTimer = null;
-    pendingId = null;
-  }
-  function cancelClose() {
-    clearTimeout(closeTimer);
-    closeTimer = null;
-  }
-  function scheduleClose() {
-    if (!win.__slaOpenPopup || closeTimer) return;
-    closeTimer = setTimeout(function () {
-      closeTimer = null;
-      setOpen(null);
-    }, CLOSE_DELAY_MS);
-  }
-
-  doc.addEventListener("mouseover", function (e) {
-    const wrap = e.target.closest && e.target.closest(".popup-wrap");
-    const row = e.target.closest && e.target.closest(".has-popup");
-    if (suppressRow && row !== suppressRow) suppressRow = null;
-
-    if (wrap && wrap.dataset.popupId === win.__slaOpenPopup) {
-      cancelClose();
-      cancelOpen();
-      return;
-    }
-    scheduleClose();
-    if (!row || row === suppressRow) {
-      cancelOpen();
-      return;
-    }
-    const id = row.closest(".popup-wrap").dataset.popupId;
-    if (id === pendingId) return;
-    cancelOpen();
-    pendingId = id;
-    openTimer = setTimeout(function () {
-      openTimer = null;
-      pendingId = null;
-      cancelClose();
-      setOpen(id);
-    }, OPEN_DELAY_MS);
-  });
-
-  // Pointer left the window entirely.
-  doc.addEventListener("mouseout", function (e) {
-    if (!e.relatedTarget) {
-      cancelOpen();
-      scheduleClose();
-    }
-  });
-
-  // Saves a popup's ticket list as CSV, built from the popup's own rows so it
-  // always matches the count that was hovered.
-  function csvCell(v) {
-    return '"' + String(v == null ? "" : v).replace(/"/g, '""') + '"';
-  }
-  // One or more popups into one CSV. Popup titles are "Team, em dash, List".
-  // (No angle brackets in this script: Streamlit's HTML handling drops it.)
-  const TITLE_SEP = " " + String.fromCharCode(8212) + " ";
-  function downloadPopups(wraps, fileBase) {
-    const lines = [["S.No", "Team", "List", "Key", "Severity", "Status", "Assignee", "Due", "Summary", "Jira Link"]];
-    wraps.forEach(function (wrap) {
-      const titleEl = wrap.querySelector(".bucket-popup-title");
-      const parts = (titleEl ? titleEl.textContent.trim() : "").split(TITLE_SEP);
-      const team = parts.length > 1 ? parts[0] : "";
-      const list = parts.length > 1 ? parts.slice(1).join(TITLE_SEP) : parts[0];
-      wrap.querySelectorAll(".bucket-popup-item").forEach(function (a) {
-        const d = a.dataset;
-        const key = d.key || (a.querySelector(".bucket-popup-key") || a).textContent.trim();
-        lines.push([lines.length, team, list, key, d.severity, d.status, d.assignee, d.due, d.summary, a.href]);
-      });
-    });
-    if (lines.length < 2) return;
-    const csv = "\\ufeff" + lines.map(function (r) { return r.map(csvCell).join(","); }).join("\\r\\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const link = doc.createElement("a");
-    const now = new Date();  // local date, not UTC, so it matches the dashboard's "today"
-    const stamp = now.getFullYear() + "-" + String(now.getMonth() + 1).padStart(2, "0") + "-" + String(now.getDate()).padStart(2, "0");
-    link.href = url;
-    link.download = fileBase.replace(/[^A-Za-z0-9]+/g, "_").replace(/^_|_$/g, "") + "_" + stamp + ".csv";
-    doc.body.appendChild(link);
-    link.click();
-    link.remove();
-    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
-  }
-
-  doc.addEventListener("click", function (e) {
-    const dl = e.target.closest && e.target.closest(".bucket-popup-download");
-    if (dl) {
-      e.preventDefault();
-      const wrap = dl.closest(".popup-wrap");
-      const titleEl = wrap.querySelector(".bucket-popup-title");
-      downloadPopups([wrap], titleEl ? titleEl.textContent.trim() : "tickets");
-      return;
-    }
-    // Section-level download: every popup tagged with the same export group.
-    const sdl = e.target.closest && e.target.closest(".section-download");
-    if (sdl) {
-      e.preventDefault();
-      const group = sdl.dataset.exportGroup;
-      downloadPopups(doc.querySelectorAll('.popup-wrap[data-export-group="' + group + '"]'), sdl.dataset.fileName || group);
-      return;
-    }
-    if (e.target.closest && e.target.closest(".bucket-popup-close")) {
-      e.preventDefault();
-      cancelOpen();
-      cancelClose();
-      setOpen(null);
-      const under = doc.elementFromPoint(e.clientX, e.clientY);
-      suppressRow = under && under.closest ? under.closest(".has-popup") : null;
-    }
-  });
-
-  new win.MutationObserver(function () {
-    const id = win.__slaOpenPopup;
-    if (!id) return;
-    const w = doc.querySelector('.popup-wrap[data-popup-id="' + id + '"]');
-    if (w && !w.classList.contains("open")) openWrap(w);
-  }).observe(doc.body, { childList: true, subtree: true });
-})();
-</script>
-"""
 
 
 def escalated_tickets_with_links(df):
@@ -529,7 +268,8 @@ LOADER_HTML = (
 st.set_page_config(page_title="Jira Breach Monitor", page_icon="🔔", layout="wide")
 
 AUTO_REFRESH_SECONDS = 60  # matches load_category_data/load_resolved_data cache ttl
-st_autorefresh(interval=AUTO_REFRESH_SECONDS * 1000, key="dashboard_autorefresh")
+if not sla_comments_ui.comments_open("dash"):  # paused while the comments dialog is open
+    st_autorefresh(interval=AUTO_REFRESH_SECONDS * 1000, key="dashboard_autorefresh")
 
 st.markdown(
     f"""
@@ -676,65 +416,7 @@ st.markdown(
         .bucket-row .label {{ color: {TEXT_SECONDARY}; font-size: 0.78rem; display: flex; align-items: center; cursor: default; }}
         .bucket-row .value {{ color: {TEXT_PRIMARY}; font-weight: 700; font-size: 0.85rem; }}
 
-        .bucket-popup {{
-            position: absolute; left: 0; top: 100%; z-index: 30;
-            width: max-content; min-width: 100%; max-width: 500px;
-            padding-top: 4px;
-            display: none;  /* not just invisible: hidden popups must not widen the page */
-        }}
-        .bucket-popup-box {{
-            background: {SURFACE_CARD}; border: 1px solid rgba(255,255,255,0.12); border-radius: 10px;
-            box-shadow: 0 12px 30px rgba(0,0,0,0.5); padding: 6px;
-        }}
-        .bucket-popup-inner {{ max-height: 260px; overflow-y: auto; }}
-        .bucket-popup-header {{
-            display: flex; align-items: center; justify-content: space-between; gap: 12px;
-            padding: 2px 4px 6px 10px; margin-bottom: 4px; border-bottom: 1px solid rgba(255,255,255,0.08);
-            font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: {TEXT_MUTED};
-        }}
-        .bucket-popup-close {{
-            cursor: pointer; font-size: 1.1rem; line-height: 1; padding: 2px 8px; border-radius: 6px;
-            color: {TEXT_SECONDARY}; text-transform: none;
-        }}
-        .bucket-popup-close:hover {{ background: rgba(255,255,255,0.1); color: {TEXT_PRIMARY}; }}
-        .bucket-popup-actions {{ display: flex; align-items: center; gap: 2px; flex-shrink: 0; }}
-        .bucket-popup-download {{
-            cursor: pointer; display: flex; align-items: center; padding: 4px 7px; border-radius: 6px;
-            color: {TEXT_SECONDARY};
-        }}
-        .bucket-popup-download:hover {{ background: rgba(255,255,255,0.1); color: {TEXT_PRIMARY}; }}
-        .bucket-popup-box:not(:has(.bucket-popup-item)) .bucket-popup-download {{ display: none; }}
-        .popup-wrap {{ position: relative; }}
-        .bucket-row.has-popup {{ cursor: pointer; }}
-        .bucket-row.has-popup:hover {{ background: rgba(255,255,255,0.04); }}
-        .bucket-row.has-popup .label {{ cursor: pointer; }}
-        .popup-wrap.open .bucket-popup {{ display: block; z-index: 40; }}
-        .bucket-popup.align-right {{ left: auto; right: 0; }}
-        .bucket-popup-item {{
-            display: flex; align-items: center; justify-content: space-between; gap: 14px;
-            padding: 6px 10px; border-radius: 6px; text-decoration: none !important;
-            font-size: 0.82rem; color: {TEXT_SECONDARY};
-        }}
-        .bucket-popup-item:hover {{ background: rgba(255,255,255,0.06); color: {TEXT_PRIMARY}; }}
-        .bucket-popup-sublink {{ padding-left: 20px; font-size: 0.74rem; opacity: 0.9; }}
-        .bucket-popup-tag {{
-            font-size: 0.6rem; font-weight: 700; padding: 2px 7px; border-radius: 999px;
-            color: white; white-space: nowrap; flex-shrink: 0;
-        }}
-        .bucket-popup-key + .bucket-popup-tag {{ margin-left: -6px; margin-right: auto; }}  /* sits next to the key */
-        .bucket-popup-status {{
-            display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; white-space: nowrap;
-            font-size: 0.66rem; font-weight: 600; color: {TEXT_SECONDARY};
-            padding: 1px 8px; border-radius: 999px; border: 1px solid rgba(255,255,255,0.16);
-        }}
-        .bucket-popup-status .dot {{ width: 6px; height: 6px; border-radius: 50%; display: inline-block; }}
-        .bucket-popup-key + .bucket-popup-status {{ margin-left: -6px; margin-right: auto; }}  /* no severity tag */
-        .bucket-popup-key {{ font-weight: 700; color: {TEXT_PRIMARY}; white-space: nowrap; flex-shrink: 0; }}
-        .bucket-popup-assignee {{
-            text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-            min-width: 0; max-width: 220px;
-        }}
-        .bucket-popup-empty {{ padding: 8px; font-size: 0.8rem; color: {TEXT_MUTED}; text-align: center; }}
+        {POPUP_CSS}
 
         button[data-baseweb="tab"] {{
             background-color: transparent; border-radius: 999px !important; padding: 6px 20px !important;
@@ -850,7 +532,8 @@ def load_category_data(category, cat_config):
 
 @st.cache_data(ttl=AUTO_REFRESH_SECONDS, show_spinner=False)  # a spinner per load pushes the page down -> visible shaking
 def load_resolved_data(category, cat_config):
-    fields = ["summary", "status", "assignee", "created", "resolutiondate", cat_config["severity_field"], breach_logic.JIRA_SLA_FIELD]
+    fields = ["summary", "status", "assignee", "created", "resolutiondate", cat_config["severity_field"], breach_logic.JIRA_SLA_FIELD,
+              ESCALATION_PATH_FIELD, ESCALATION_PATH_OTHER_FIELD]
     issues = jira_client.search_issues(cat_config["resolved_jql"], fields=fields)
 
     rows = []
@@ -866,6 +549,8 @@ def load_resolved_data(category, cat_config):
             "Resolved Status": result["status"],
             "Due Datetime": result["due_date"],
             "Created Today": created_today(f.get("created")),
+            "Created": created_text(f.get("created")),
+            "Escalation Path": escalation_path_value(f),
         })
     return pd.DataFrame(rows)
 
@@ -896,6 +581,12 @@ def created_today(created_raw):
     return created_dt.date() == datetime.now(created_dt.tzinfo).date()
 
 
+def created_text(raw):
+    """Jira created timestamp as "YYYY-MM-DD HH:MM" in Jira time (blank if missing)."""
+    parsed = breach_logic._parse_datetime(raw)
+    return parsed.astimezone(breach_logic.JIRA_TZ).strftime("%Y-%m-%d %H:%M") if parsed else ""
+
+
 def popup_ticket(row):
     due = row.get("Due")
     if due is None and row.get("Due Datetime") is not None:
@@ -906,6 +597,8 @@ def popup_ticket(row):
         "severity": row.get("Severity") or "N/A",
         "status": row.get("Status") or "",
         "summary": row.get("Summary") or "",
+        "created": created_text(row.get("Created")) if row.get("Created") else "",
+        "escalation": row.get("Escalation Path") or "",
         "due": due or "",
         "escalation": row.get("Escalation Path") or "",
     }
@@ -994,14 +687,15 @@ def resolved_sla_frame(resolved_data, resolved_errors, open_buckets):
               for category, df in resolved_data.items()
               if category not in resolved_errors and not df.empty]
     resolved_all = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(
-        columns=["Team", "Key", "Summary", "Severity", "Status", "Assignee", "Resolved Status", "Due Datetime"])
-    open_keys = ["Team", "key", "summary", "severity", "status", "assignee", "due"]
+        columns=["Team", "Key", "Summary", "Severity", "Status", "Assignee", "Resolved Status", "Due Datetime",
+                 "Created", "Escalation Path"])
+    open_keys = ["Team", "key", "summary", "severity", "status", "assignee", "due", "escalation", "created"]
     open_rows = [{**t, "Team": category} for category, bucket in open_buckets.items()
                  for t in bucket[BUCKET_BREACHED_TODAY]["tickets"]
                  if not is_excluded_from_open_breached(t)]
     open_all = pd.DataFrame(open_rows, columns=open_keys).rename(columns={
         "key": "Key", "summary": "Summary", "severity": "Severity", "status": "Status",
-        "assignee": "Assignee", "due": "Due"})
+        "assignee": "Assignee", "due": "Due", "escalation": "Escalation", "created": "Created"})
 
     rows = []
     for team in [*config.CATEGORIES, "All teams"]:
@@ -1043,6 +737,8 @@ def resolved_ticket_sheet(resolved_all, open_all):
         "Assignee": resolved_all["Assignee"].values,
         "SLA": resolved_all["Resolved Status"].map(labels).fillna("No SLA (severity not set)").values,
         "SLA Due": resolved_all["Due Datetime"].map(due_text).values,
+        "Created": resolved_all["Created"].fillna("").values,
+        "Escalation Path": resolved_all["Escalation Path"].fillna("").values,
     })
     still_open = pd.DataFrame({
         "Team": open_all["Team"].values,
@@ -1053,8 +749,13 @@ def resolved_ticket_sheet(resolved_all, open_all):
         "Assignee": open_all["Assignee"].values,
         "SLA": ["Open, breached"] * len(open_all),
         "SLA Due": open_all["Due"].values,
+        "Created": open_all["Created"].values,
+        "Escalation Path": open_all["Escalation"].fillna("").values,
     })
     sheet = pd.concat([resolved, still_open], ignore_index=True)
+    reasons = {key: note["comment"] for key, note in sla_comments.load_all().items() if note["comment"]}
+    sheet["Breached Reason"] = [reasons.get(key, "") if sla in ("Resolved late", "Open, breached") else ""
+                                for key, sla in zip(sheet["Key"], sheet["SLA"])]
     sheet["Link"] = sheet["Key"].map(ui_common.jira_url)
     return sheet
 
@@ -1241,14 +942,14 @@ with refresh_col:
         st.cache_data.clear()
         st.rerun()
 with header_col3:
-    # pages/Ticket_Trend_Analysis.py and pages/Resolved_Tickets_History.py,
+    # pages/Ticket_Trend_Analysis.py and pages/Historical_Tickets.py,
     # each opened in its own browser tab.
     st.markdown(
         '<div class="page-links">'
         '<a class="trend-link" href="Ticket_Trend_Analysis" target="_blank" rel="noopener">'
         '📈&nbsp; Ticket Trend Analysis &#8599;</a>'
-        '<a class="trend-link" href="Resolved_Tickets_History" target="_blank" rel="noopener">'
-        '✅&nbsp; Resolved History &#8599;</a></div>'
+        '<a class="trend-link" href="Historical_Tickets" target="_blank" rel="noopener">'
+        '✅&nbsp; Historical Tickets &#8599;</a></div>'
         # Same block as the links, so the note always sits below them.
         f'<div class="app-refreshed">Last refreshed: {breach_logic.jira_now():%Y-%m-%d %H:%M:%S %Z}'
         f' &middot; auto-refreshes every {AUTO_REFRESH_SECONDS // 60} min'
@@ -1405,10 +1106,60 @@ with st.container(border=True):
             file_name=f"Resolved_SLA_Summary_{breach_logic.jira_now():%Y-%m-%d}.png",
             mime="image/png", help="The Summary table as an image.",
         )
-    st.markdown(sla_views.sla_severity_html(sev_summary), unsafe_allow_html=True)
+    def breached_sev_popup(team, sev, count_html, count):
+        """Hover popup on a Breached SLA count: the tickets behind it (resolved late today
+        plus open breached today) with key, severity, assignee and status."""
+        res = sev_resolved[(sev_resolved["Severity"] == sev)
+                           & (sev_resolved["Resolved Status"] == breach_logic.STATUS_BREACHED)]
+        opn = sev_open[sev_open["Severity"] == sev]
+        if team != "All teams":
+            res, opn = res[res["Team"] == team], opn[opn["Team"] == team]
+        else:
+            res, opn = res.drop_duplicates("Key"), opn.drop_duplicates("Key")
+        tickets = []
+        for _, row in pd.concat([res, opn], ignore_index=True).iterrows():
+            tickets.append({"key": row["Key"], "assignee": row["Assignee"] or "Unassigned",
+                            "severity": row["Severity"] or "N/A", "status": row["Status"] or "",
+                            "summary": row["Summary"] or "", "due": "",
+                            "escalation": row["Escalation"] if isinstance(row.get("Escalation"), str) else ""})
+        return popup_row(count_html, bucket_popup_html(tickets),
+                         f"{team} — {sev} Breached SLA today ({count})", row_class="asg-popup-cell")
+
+    st.markdown(sla_views.sla_severity_html(sev_summary, wrap_breached=breached_sev_popup), unsafe_allow_html=True)
     st.caption(f"Within SLA = resolved before Created + the severity's SLA "
                f"({', '.join(f'{s} {m // 60} h' for s, m in config.SLA_MINUTES.items())}). "
                "SLA % = within ÷ (within + resolved late + open breached), the same rule as Today SLA.")
+
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# SLA miss comments: every ticket breached today (resolved late + open breached)
+# ---------------------------------------------------------------------------
+def todays_breached_for_comments():
+    seen, out = set(), []
+    sources = [
+        (sev_resolved[sev_resolved["Resolved Status"] == breach_logic.STATUS_BREACHED], "Status", "Key"),
+        (sev_open, "Status", "Key"),
+    ]
+    for frame, _, _ in sources:
+        for _, r in frame.iterrows():
+            if r["Key"] in seen:
+                continue
+            seen.add(r["Key"])
+            out.append({
+                "key": r["Key"], "team": _text(r.get("Team")), "summary": _text(r.get("Summary")),
+                "assignee": _text(r.get("Assignee")),
+                "severity": _text(r.get("Severity")) or "N/A", "status": _text(r.get("Status")),
+                "escalation": _text(r.get("Escalation")),
+            })
+    return out
+
+
+def _text(value):
+    return value if isinstance(value, str) else ""
+
+
+sla_comments_ui.open_comments_button(
+    todays_breached_for_comments(), "dash", f"💬 SLA miss comments ({len(todays_breached_for_comments())} breached today)")
 
 # ---------------------------------------------------------------------------
 # Section: Time to Resolve - Open Tickets
@@ -1538,88 +1289,91 @@ for tab, (category, cat_config) in zip(tabs, config.CATEGORIES.items()):
 
         st.markdown(ui_table.html_table(ticket_details_view(shown), max_height=500), unsafe_allow_html=True)
 
-# ---------------------------------------------------------------------------
-# Section: Productivity by Assignee — Today
-# ---------------------------------------------------------------------------
-st.markdown('<div class="section-title">Productivity by Assignee &mdash; Today</div>', unsafe_allow_html=True)
+# Productivity by Assignee is hidden from the dashboard (set to True to show it again).
+SHOW_PRODUCTIVITY_BY_ASSIGNEE = False
+if SHOW_PRODUCTIVITY_BY_ASSIGNEE:
+    # ---------------------------------------------------------------------------
+    # Section: Productivity by Assignee — Today
+    # ---------------------------------------------------------------------------
+    st.markdown('<div class="section-title">Productivity by Assignee &mdash; Today</div>', unsafe_allow_html=True)
 
-category_names = list(config.CATEGORIES.keys())
-team_filter = st.multiselect(
-    "Filter by team",
-    options=category_names,
-    default=category_names,
-    key="productivity_team_filter",
-)
-selected_categories = [cat for cat in category_names if cat in team_filter]
-
-per_assignee_open = defaultdict(lambda: defaultdict(int))
-for category, df in category_data.items():
-    if category not in selected_categories or category in category_errors or df.empty:
-        continue
-    for assignee, count in df["Assignee"].value_counts().items():
-        per_assignee_open[assignee][category] = int(count)
-
-per_assignee_resolved = defaultdict(lambda: defaultdict(int))
-for category, df in resolved_data.items():
-    if category not in selected_categories or category in resolved_errors or df.empty:
-        continue
-    for assignee, count in df["Assignee"].value_counts().items():
-        per_assignee_resolved[assignee][category] = int(count)
-
-assignees = set(per_assignee_open) | set(per_assignee_resolved)
-
-if not selected_categories:
-    st.info("Select at least one team to see productivity data.")
-elif not assignees:
-    st.info("No open or resolved tickets to report on.")
-else:
-    open_cols = [f"{cat} (Open)" for cat in selected_categories]
-    resolved_cols = [f"{cat} (Resolved)" for cat in selected_categories]
-
-    rows = []
-    for assignee in assignees:
-        row = {"Assignee": assignee}
-        total_open = 0
-        total_resolved = 0
-        for cat in selected_categories:
-            row[f"{cat} (Open)"] = per_assignee_open[assignee].get(cat, 0)
-            row[f"{cat} (Resolved)"] = per_assignee_resolved[assignee].get(cat, 0)
-            total_open += row[f"{cat} (Open)"]
-            total_resolved += row[f"{cat} (Resolved)"]
-        row["Total Open"] = total_open
-        row["Total Resolved Today"] = total_resolved
-        rows.append(row)
-
-    columns = ["Assignee", *open_cols, *resolved_cols, "Total Open", "Total Resolved Today"]
-    productivity_df = pd.DataFrame(rows, columns=columns)
-    productivity_df = productivity_df.sort_values("Total Open", ascending=True).reset_index(drop=True)
-
-    grand_total = {"Assignee": "Grand Total"}
-    for col in [*open_cols, *resolved_cols, "Total Open", "Total Resolved Today"]:
-        grand_total[col] = int(productivity_df[col].sum())
-    display_df = pd.concat([productivity_df, pd.DataFrame([grand_total])], ignore_index=True)
-
-    st.markdown(ui_table.html_table(display_df, total_row=True, max_height=500), unsafe_allow_html=True)
-
-    excel_buffer = io.BytesIO()
-    with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
-        display_df.to_excel(writer, sheet_name="Productivity", index=False)
-        ws = writer.sheets["Productivity"]
-        for col_idx, col_name in enumerate(display_df.columns, start=1):
-            max_len = max(len(str(col_name)), display_df[col_name].astype(str).map(len).max()) + 4
-            ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = max_len
-        bold = Font(bold=True)
-        for cell in ws[1]:
-            cell.font = bold
-        for cell in ws[ws.max_row]:
-            cell.font = bold
-
-    st.download_button(
-        "⬇️ Download as Excel",
-        data=excel_buffer.getvalue(),
-        file_name=f"Productivity_Report_{datetime.now().strftime('%Y-%m-%d')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    category_names = list(config.CATEGORIES.keys())
+    team_filter = st.multiselect(
+        "Filter by team",
+        options=category_names,
+        default=category_names,
+        key="productivity_team_filter",
     )
+    selected_categories = [cat for cat in category_names if cat in team_filter]
+
+    per_assignee_open = defaultdict(lambda: defaultdict(int))
+    for category, df in category_data.items():
+        if category not in selected_categories or category in category_errors or df.empty:
+            continue
+        for assignee, count in df["Assignee"].value_counts().items():
+            per_assignee_open[assignee][category] = int(count)
+
+    per_assignee_resolved = defaultdict(lambda: defaultdict(int))
+    for category, df in resolved_data.items():
+        if category not in selected_categories or category in resolved_errors or df.empty:
+            continue
+        for assignee, count in df["Assignee"].value_counts().items():
+            per_assignee_resolved[assignee][category] = int(count)
+
+    assignees = set(per_assignee_open) | set(per_assignee_resolved)
+
+    if not selected_categories:
+        st.info("Select at least one team to see productivity data.")
+    elif not assignees:
+        st.info("No open or resolved tickets to report on.")
+    else:
+        open_cols = [f"{cat} (Open)" for cat in selected_categories]
+        resolved_cols = [f"{cat} (Resolved)" for cat in selected_categories]
+
+        rows = []
+        for assignee in assignees:
+            row = {"Assignee": assignee}
+            total_open = 0
+            total_resolved = 0
+            for cat in selected_categories:
+                row[f"{cat} (Open)"] = per_assignee_open[assignee].get(cat, 0)
+                row[f"{cat} (Resolved)"] = per_assignee_resolved[assignee].get(cat, 0)
+                total_open += row[f"{cat} (Open)"]
+                total_resolved += row[f"{cat} (Resolved)"]
+            row["Total Open"] = total_open
+            row["Total Resolved Today"] = total_resolved
+            rows.append(row)
+
+        columns = ["Assignee", *open_cols, *resolved_cols, "Total Open", "Total Resolved Today"]
+        productivity_df = pd.DataFrame(rows, columns=columns)
+        productivity_df = productivity_df.sort_values("Total Open", ascending=True).reset_index(drop=True)
+
+        grand_total = {"Assignee": "Grand Total"}
+        for col in [*open_cols, *resolved_cols, "Total Open", "Total Resolved Today"]:
+            grand_total[col] = int(productivity_df[col].sum())
+        display_df = pd.concat([productivity_df, pd.DataFrame([grand_total])], ignore_index=True)
+
+        st.markdown(ui_table.html_table(display_df, total_row=True, max_height=500), unsafe_allow_html=True)
+
+        excel_buffer = io.BytesIO()
+        with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+            display_df.to_excel(writer, sheet_name="Productivity", index=False)
+            ws = writer.sheets["Productivity"]
+            for col_idx, col_name in enumerate(display_df.columns, start=1):
+                max_len = max(len(str(col_name)), display_df[col_name].astype(str).map(len).max()) + 4
+                ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = max_len
+            bold = Font(bold=True)
+            for cell in ws[1]:
+                cell.font = bold
+            for cell in ws[ws.max_row]:
+                cell.font = bold
+
+        st.download_button(
+            "⬇️ Download as Excel",
+            data=excel_buffer.getvalue(),
+            file_name=f"Productivity_Report_{datetime.now().strftime('%Y-%m-%d')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
 # ---------------------------------------------------------------------------
 # Teams report settings: at the bottom, collapsed, unlocked with an admin PIN
@@ -1646,7 +1400,7 @@ def save_link_from_box():
     link = st.session_state.get("report_link", "").strip()
     if link:
         report_settings.save({**report_settings.load(), "webhook_url": link})
-with st.expander("Teams report settings (admin)"):
+with st.expander("Report Settings (Admin)"):
     if REPORT_PIN and not st.session_state.get("report_unlocked"):
         st.caption("Enter the admin PIN to view and change the report settings.")
         pin = st.text_input("PIN", type="password", key="report_pin")
@@ -1673,23 +1427,95 @@ with st.expander("Teams report settings (admin)"):
                 st.success("Link saved")
             else:
                 st.warning("Paste the link first")
-        enabled = st.toggle("Send a report every 2 hours", value=saved["enabled"], key="report_enabled")
+        interval = st.selectbox(
+            "Report frequency (08:00–22:00 Puerto Rico time)",
+            report_settings.INTERVAL_CHOICES,
+            index=report_settings.INTERVAL_CHOICES.index(report_settings.interval_hours(saved)),
+            format_func=lambda h: "Every hour" if h == 1 else f"Every {h} hours",
+            key="report_interval",
+        )
+        if interval != report_settings.interval_hours(saved):
+            report_settings.save({**report_settings.load(), "interval_hours": interval})
+        enabled = st.toggle(f"Send a report {'every hour' if interval == 1 else f'every {interval} hours'}",
+                            value=saved["enabled"], key="report_enabled")
         if enabled != saved["enabled"]:
             report_settings.save({**report_settings.load(), "enabled": enabled})
         eod_enabled = st.toggle("Send end-of-day report at 00:00:00 Jira time (covers the previous full day)",
                                 value=saved["eod_enabled"], key="report_eod_enabled")
         if eod_enabled != saved["eod_enabled"]:
             report_settings.save({**report_settings.load(), "eod_enabled": eod_enabled})
+        st.markdown("**Email (SMTP)**")
+        email_interval = st.selectbox(
+            "Email frequency (08:00–23:00 Puerto Rico time)",
+            report_settings.INTERVAL_CHOICES,
+            index=report_settings.INTERVAL_CHOICES.index(report_settings.email_interval_hours(saved)),
+            format_func=lambda h: "Every hour" if h == 1 else f"Every {h} hours",
+            key="report_email_interval",
+        )
+        if email_interval != report_settings.email_interval_hours(saved):
+            report_settings.save({**report_settings.load(), "email_interval_hours": email_interval})
+        email_hourly = st.toggle("Send emails at the frequency above, 08:00 to 23:00 Puerto Rico time (today's inflow, Excel attached)",
+                                 value=saved["email_hourly_enabled"], key="report_email_hourly")
+        if email_hourly != saved["email_hourly_enabled"]:
+            report_settings.save({**report_settings.load(), "email_hourly_enabled": email_hourly})
+        email_eod = st.toggle("Send end-of-day email at 00:00:00 Jira time (previous full day, Excel attached)",
+                              value=saved["email_eod_enabled"], key="report_email_eod")
+        if email_eod != saved["email_eod_enabled"]:
+            report_settings.save({**report_settings.load(), "email_eod_enabled": email_eod})
+        recipients_now = smtp_mail.live_recipients()
+        recipients_text = st.text_area("Email recipients (one per line, or separated by ;)",
+                                       value="\n".join(recipients_now), key="report_recipients", height=150,
+                                       help="Receive the hourly and end-of-day emails when their switches are on.")
+        st.caption(f"{len(recipients_now)} recipient(s) saved")
+        if st.button("Save recipients", key="report_save_recipients"):
+            entries = smtp_mail.split_recipients(recipients_text)
+            bad = [e for e in entries if not smtp_mail.valid_address(e)]
+            if not entries:
+                st.warning("Add at least one recipient")
+            elif bad:
+                st.error("Not a valid email address: " + ", ".join(bad))
+            else:
+                report_settings.save({**report_settings.load(), "email_recipients": entries})
+                st.success(f"Saved {len(entries)} recipient(s)")
+        email_log = saved.get("email_log") or {}
+        for kind, label in (("hourly", "Last hourly email"), ("eod", "Last end-of-day email")):
+            entry = email_log.get(kind)
+            if not entry:
+                st.caption(f"{label}: none sent yet")
+            elif entry["ok"]:
+                st.caption(f"{label}: {entry['at']} · sent ({entry['detail']})")
+            else:
+                st.caption(f"{label}: {entry['at']} · FAILED: {entry['detail']}")
+        if st.button("Send hourly email now", key="report_email_hourly_now",
+                     help="Sends today's inflow email to the saved recipients right away."):
+            try:
+                sla_report.send_hourly_email()
+                st.success(f"Hourly email sent to {len(smtp_mail.live_recipients())} recipient(s)")
+            except Exception as exc:
+                st.error(f"Hourly email not sent: {exc}")
+        if st.button("Send end-of-day email now", key="report_email_eod_now",
+                     help="Sends the previous day's email to the saved recipients right away."):
+            try:
+                sla_report.send_eod_email_now()
+                st.success(f"End-of-day email sent to {len(smtp_mail.live_recipients())} recipient(s)")
+            except Exception as exc:
+                st.error(f"End-of-day email not sent: {exc}")
+        if st.button("Send test email to the test address", key="report_email_test"):
+            try:
+                sla_report.send_test_email()
+                st.success("Test email sent (test address only)")
+            except Exception as exc:
+                st.error(f"Test email not sent: {exc}")
         if st.button("Send end-of-day report now", key="report_eod_now"):
             try:
                 scheduler.send_eod_now()
-                st.success("End-of-day report sent to IM Chat; the Excel file is in the reports folder")
+                st.success("End-of-day report sent to Prodapt Incident Managers; the Excel file is in the reports folder")
             except Exception as exc:
                 st.error(f"Not sent: {exc}")
         if st.button("Send now", key="report_send_now"):
             try:
                 scheduler.send_now()
-                st.success("Report sent to IM Chat")
+                st.success("Report sent to Prodapt Incident Managers")
             except Exception as exc:
                 st.error(f"Not sent: {exc}")
         next_text = f"{status['next']:%d %b %H:%M %Z}" if status["next"] and enabled else "off"

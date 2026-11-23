@@ -14,6 +14,7 @@ import pandas as pd
 
 import breach_logic
 import config
+import jira_client
 import trend_analysis as ta
 import trend_store
 
@@ -101,6 +102,114 @@ def sla_by_severity(df, start, end):
                         f"{sev} Resolved late": c["late"], f"{sev} SLA %": c["pct"]})
         rows.append(row)
     return pd.DataFrame(rows)
+
+
+OPEN_FIELDS = ["summary", "status", "created", config.SEVERITY_FIELD, breach_logic.JIRA_SLA_FIELD,
+               breach_logic.ESCALATION_PATH_FIELD]
+
+
+def load_open_breached():
+    """Open tickets of each team that are breached right now, from Jira. One row per
+    ticket and team: key, category, created (YYYY-MM-DD, Jira time), severity, breached.
+    A breach is left out for Escalated tickets on the Network / A2P path."""
+    rows = []
+    for team, cfg in config.CATEGORIES.items():
+        jqls = [cfg["jql"]] + ([cfg["backlog_jql"]] if cfg.get("backlog_jql") else [])
+        seen = set()
+        for jql in jqls:
+            for issue in jira_client.search_issues(jql, fields=OPEN_FIELDS):
+                if issue["key"] in seen:
+                    continue
+                seen.add(issue["key"])
+                f = issue["fields"]
+                result = breach_logic.evaluate(issue, cfg)
+                path = f.get(breach_logic.ESCALATION_PATH_FIELD)
+                path = path.get("value") if isinstance(path, dict) else path
+                breached = (result["status"] == breach_logic.STATUS_BREACHED and not breach_logic.is_excluded_open_breached(
+                    (f.get("status") or {}).get("name"), path))
+                rows.append({"key": issue["key"], "category": team, "created": (f.get("created") or "")[:10],
+                             "severity": result["severity"] or "N/A", "breached": breached,
+                             "status": (f.get("status") or {}).get("name", ""),
+                             "assignee": (f.get("assignee") or {}).get("displayName", "Unassigned"),
+                             "escalation": path or "",
+                             "summary": f.get("summary") or ""})
+    return pd.DataFrame(rows, columns=["key", "category", "created", "severity", "breached", "status",
+                                       "assignee", "summary", "escalation"])
+
+
+def sla_by_created(df, open_rows, start, end):
+    """SLA by severity for tickets CREATED in [start, end], wherever they stand now.
+    Resolved ones are judged on their resolution (within / resolved late, as the
+    dashboard). Open ones count as Open breached only if they are breached now.
+    Open tickets not yet breached are not judged. "All teams" counts each ticket once."""
+    lo, hi = f"{start:%Y-%m-%d}", f"{end:%Y-%m-%d}"
+    res = df[(df["created"].str[:10] >= lo) & (df["created"].str[:10] <= hi)]
+    opn = open_rows[(open_rows["created"] >= lo) & (open_rows["created"] <= hi) & open_rows["breached"]]
+    rows = []
+    for team in [*TEAMS, "All teams"]:
+        r_part = res.drop_duplicates("key") if team == "All teams" else res[res["category"] == team]
+        o_part = opn.drop_duplicates("key") if team == "All teams" else opn[opn["category"] == team]
+        row = {"Team": team}
+        for sev in config.SLA_MINUTES:
+            rs = r_part[r_part["severity"] == sev]
+            within = int((rs["sla"] == WITHIN).sum())
+            late = int((rs["sla"] == LATE).sum())
+            open_n = int((o_part["severity"] == sev).sum())
+            judged = within + late + open_n
+            row.update({f"{sev} Resolved": len(rs), f"{sev} Within SLA": within,
+                        f"{sev} Resolved late": late, f"{sev} Open breached": open_n,
+                        f"{sev} SLA %": round(within / judged * 100, 1) if judged else None})
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _created_counts(df, open_rows, start, end, team):
+    lo, hi = f"{start:%Y-%m-%d}", f"{end:%Y-%m-%d}"
+    res = df[(df["created"].str[:10] >= lo) & (df["created"].str[:10] <= hi)]
+    opn = open_rows[(open_rows["created"] >= lo) & (open_rows["created"] <= hi) & open_rows["breached"]]
+    if team == "All teams":
+        res, opn = res.drop_duplicates("key"), opn.drop_duplicates("key")
+    else:
+        res, opn = res[res["category"] == team], opn[opn["category"] == team]
+    within = int((res["sla"] == WITHIN).sum())
+    late = int((res["sla"] == LATE).sum())
+    open_n = len(opn)
+    breached = late + open_n
+    return {"resolved": len(res), "within": within, "late": late, "open_breached": open_n,
+            "breached": breached, "pct": sla_pct(within, breached)}
+
+
+def created_summary(df, open_rows, start, end, prev_range):
+    """Per team (and "All teams", each ticket once) for tickets CREATED in the period,
+    with Within SLA and Breached SLA (= resolved late + open breached), and the
+    same for the comparison period."""
+    out = {}
+    for team in [*TEAMS, "All teams"]:
+        out[team] = {**_created_counts(df, open_rows, start, end, team),
+                     "prev": _created_counts(df, open_rows, *prev_range, team)}
+    return out
+
+
+def breached_tickets(df, open_rows, start, end, team, sev):
+    """The tickets behind one Breached SLA count (team and severity, created in
+    [start, end]): resolved late, then open breached. Returns a list of dicts."""
+    lo, hi = f"{start:%Y-%m-%d}", f"{end:%Y-%m-%d}"
+    res = df[(df["created"].str[:10] >= lo) & (df["created"].str[:10] <= hi)
+             & (df["sla"] == LATE) & (df["severity"] == sev)]
+    opn = open_rows[(open_rows["created"] >= lo) & (open_rows["created"] <= hi)
+                    & open_rows["breached"] & (open_rows["severity"] == sev)]
+    if team == "All teams":
+        res, opn = res.drop_duplicates("key"), opn.drop_duplicates("key")
+    else:
+        res, opn = res[res["category"] == team], opn[opn["category"] == team]
+    out = []
+    for part in (res, opn):
+        for _, row in part.iterrows():
+            out.append({"key": row["key"], "team": row["category"], "assignee": row["assignee"] or "Unassigned",
+                        "severity": row["severity"] or "N/A", "status": row["status"] or "",
+                        "summary": row["summary"] or "", "due": "",
+                        "escalation": row["escalation"] if "escalation" in row.index and isinstance(row["escalation"], str) else ""})
+    return out
 
 
 def trend(df, first, last, by):

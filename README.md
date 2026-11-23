@@ -148,7 +148,7 @@ sync as the trend page. Reopened tickets drop out at the next sync.
 | `dashboard.py` | Streamlit live dashboard UI |
 | `pages/Ticket_Trend_Analysis.py` | Ticket Trend Analysis page (opened from the dashboard) |
 | `trend_store.py` | Jira -> local SQLite cache for the trend page; `--loop` = sync agent |
-| `pages/Resolved_Tickets_History.py` | Resolved Tickets History page (opened from the dashboard) |
+| `pages/Historical_Tickets.py` | Historical Tickets page (opened from the dashboard) |
 | `resolved_analysis.py` | Resolved history: per-team SLA, trends, by assignee, ticket list |
 | `ui_common.py` | Shared look, period picker, sync trigger and Excel styling for both pages |
 | `trend_analysis.py` | Driver grouping, top drivers, weekly trends, SAL / SFS fix matching and alerts |

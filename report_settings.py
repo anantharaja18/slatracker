@@ -11,7 +11,10 @@ import os
 import threading
 
 PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "report_settings.json")
-DEFAULTS = {"webhook_url": "", "enabled": False, "eod_enabled": False}
+DEFAULTS = {"webhook_url": "", "enabled": False, "eod_enabled": False, "interval_hours": 1,
+            "email_hourly_enabled": False, "email_eod_enabled": False,
+            "email_recipients": None, "email_log": {}, "email_interval_hours": 1}  # None = use SMTP_TO from .env; a list = saved in the admin panel
+INTERVAL_CHOICES = (1, 2, 3, 4)
 _lock = threading.Lock()
 
 
@@ -30,6 +33,18 @@ def save(settings):
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump({**DEFAULTS, **settings}, f, indent=2)
         os.replace(tmp, PATH)
+
+
+def interval_hours(settings=None):
+    """How often the slot report runs, in hours (1, 2, 3 or 4). Anything else falls back to 1."""
+    value = (settings or load()).get("interval_hours", 1)
+    return value if value in INTERVAL_CHOICES else 1
+
+
+def email_interval_hours(settings=None):
+    """How often the email report runs, in hours (1, 2, 3 or 4). Anything else falls back to 1."""
+    value = (settings or load()).get("email_interval_hours", 1)
+    return value if value in INTERVAL_CHOICES else 1
 
 
 def webhook_url():

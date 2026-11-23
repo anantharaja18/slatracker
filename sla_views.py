@@ -6,7 +6,8 @@ Input is a DataFrame with one row per team (plus "All teams" last). For each
 severity in config.SLA_MINUTES (e.g. Sev-1, Sev-2) it has these columns:
     "<sev> Resolved", "<sev> Within SLA", "<sev> Resolved late", "<sev> SLA %"
 and, optionally, "<sev> Open breached" (the dashboard shows it; the history
-page does not, because it only looks at resolved tickets).
+page does not, because it only looks at resolved tickets). The table shows
+Resolved, Within SLA, Breached SLA (= resolved late + open breached) and SLA %.
 """
 
 import html
@@ -36,6 +37,9 @@ CSS = f"""
     .asg-table th .dot {{ width: 7px; height: 7px; border-radius: 50%; display: inline-block; margin-right: 6px; }}
     .asg-table td {{ text-align: right; padding: 8px 14px; border-top: 1px solid rgba(255,255,255,0.05); white-space: nowrap; }}
     .asg-table tbody tr:hover td {{ background: rgba(255,255,255,0.03); }}
+    .asg-popups {{ overflow: visible; max-height: none; }}
+    .asg-table .asg-popup-cell {{ display: inline-block; cursor: pointer; }}
+    .asg-table .popup-wrap {{ display: inline-block; }}
     .asg-name {{ display: flex; align-items: center; gap: 10px; color: {TEXT_PRIMARY}; font-weight: 600; }}
     .asg-zero {{ color: rgba(255,255,255,0.22); }}
     .asg-good {{ color: {COLOR_GOOD}; font-weight: 600; }}
@@ -56,17 +60,21 @@ CSS = f"""
 """
 
 # Column classes for the count cells, by metric name.
-METRIC_CLASS = {"Within SLA": "asg-good", "Resolved late": "asg-bad", "Open breached": "asg-bad"}
+METRIC_CLASS = {"Within SLA": "asg-good", "Breached SLA": "asg-bad"}
 
 
-def metrics_of(table):
-    """The metrics shown under each severity, in order. "Open breached" only
-    when the table has it."""
-    first = next(iter(config.SLA_MINUTES))
-    names = ["Resolved", "Within SLA", "Resolved late"]
-    if f"{first} Open breached" in table.columns:
-        names.append("Open breached")
-    return names + ["SLA %"]
+def metrics_of(table=None):
+    """The metrics shown under each severity, in order."""
+    return ["Resolved", "Within SLA", "Breached SLA", "SLA %"]
+
+
+def metric_value(r, sev, metric):
+    """One count for a team row and severity. Breached SLA = resolved late + open
+    breached (open breached counts only when the table has that column)."""
+    if metric == "Breached SLA":
+        open_col = f"{sev} Open breached"
+        return int(r[f"{sev} Resolved late"]) + (int(r[open_col]) if open_col in r.index else 0)
+    return int(r[f"{sev} {metric}"])
 
 
 def pct_color(pct):
@@ -86,29 +94,50 @@ def sla_cell(pct):
             f'border-color:{color}66;background:{color}1f;">{pct:.1f}%</span></span>')
 
 
+def overall_pct(r):
+    """SLA % across all severities for one team row: within / (within + breached)."""
+    within = sum(int(r[f"{sev} Within SLA"]) for sev in config.SLA_MINUTES)
+    breached = sum(metric_value(r, sev, "Breached SLA") for sev in config.SLA_MINUTES)
+    judged = within + breached
+    return round(within / judged * 100, 1) if judged else None
+
+
 def count_cell(v, cls=""):
     v = int(v)
     return '<span class="asg-zero">—</span>' if v == 0 else f'<span class="{cls}">{v:,}</span>'
 
 
-def sla_severity_html(table):
-    """The per-team, per-severity SLA table as HTML (needs CSS above on the page)."""
+def sla_severity_html(table, wrap_breached=None):
+    """The per-team, per-severity SLA table as HTML (needs CSS above on the page).
+    wrap_breached(team, sev, count_html, count) may wrap a non-zero Breached SLA
+    count (e.g. in a ticket popup); its output replaces the count's HTML."""
     sevs = list(config.SLA_MINUTES.items())
     metrics = metrics_of(table)
     head = '<th>Team</th>' + "".join(
         f'<th colspan="{len(metrics)}" style="text-align:center;">{sev} &middot; SLA {mins // 60} h</th>'
         for sev, mins in sevs)
-    subhead = '<th></th>' + "".join(f'<th>{m}</th>' for _ in sevs for m in metrics)
+    subhead = '<th></th>' + "".join(f'<th>{m}</th>' for _ in sevs for m in metrics) + '<th>SLA %</th>'
+    head += '<th>Overall</th>'
+
+    def cell_html(r, sev, m):
+        if m == "SLA %":
+            return sla_cell(r[f"{sev} SLA %"])
+        value = metric_value(r, sev, m)
+        inner = count_cell(value, METRIC_CLASS.get(m, ""))
+        if m == "Breached SLA" and wrap_breached and value:
+            inner = wrap_breached(r["Team"], sev, inner, value)
+        return inner
+
     body = []
     for _, r in table.iterrows():
         is_all = r["Team"] == "All teams"
         dot = "" if is_all else f'<span class="dot" style="background:{TEAM_COLOR.get(r["Team"], TEXT_MUTED)};"></span>'
-        cells = "".join(
-            f'<td>{sla_cell(r[f"{sev} SLA %"]) if m == "SLA %" else count_cell(r[f"{sev} {m}"], METRIC_CLASS.get(m, ""))}</td>'
-            for sev, _mins in sevs for m in metrics)
+        cells = "".join(f'<td>{cell_html(r, sev, m)}</td>' for sev, _mins in sevs for m in metrics)
+        cells += f'<td>{sla_cell(overall_pct(r))}</td>'
         cls = ' class="asg-grand"' if is_all else ""
         body.append(f'<tr{cls}><td><span class="asg-name">{dot}{html.escape(str(r["Team"]))}</span></td>{cells}</tr>')
-    return (f'<div class="asg-wrap"><table class="asg-table"><thead><tr>{head}</tr><tr>{subhead}</tr></thead>'
+    wrap_cls = "asg-wrap asg-popups" if wrap_breached else "asg-wrap"
+    return (f'<div class="{wrap_cls}"><table class="asg-table"><thead><tr>{head}</tr><tr>{subhead}</tr></thead>'
             f'<tbody>{"".join(body)}</tbody></table></div>')
 
 
@@ -131,13 +160,13 @@ def severity_png(table, title, subtitle):
     pad, team_w, num_w = 24, 240, 118
     head1_h, head2_h, row_h = 44, 36, 44
     group_w = num_w * len(metrics)
-    width = pad * 2 + team_w + group_w * len(sevs)
+    width = pad * 2 + team_w + group_w * len(sevs) + num_w
     top = pad + 80
     height = top + head1_h + head2_h + row_h * len(table) + pad
     img = Image.new("RGB", (width, height), "#ffffff")
     d = ImageDraw.Draw(img)
     dark, grey, rule, band = "#20202c", "#5b5b66", "#d9d9e0", "#f4f4f8"
-    metric_color = {"Within SLA": COLOR_GOOD, "Resolved late": COLOR_CRITICAL, "Open breached": COLOR_CRITICAL}
+    metric_color = {"Within SLA": COLOR_GOOD, "Breached SLA": COLOR_CRITICAL}
 
     d.text((pad, pad), title, font=font(26, True), fill=dark)
     d.text((pad, pad + 38), subtitle, font=font(15), fill=grey)
@@ -151,6 +180,10 @@ def severity_png(table, title, subtitle):
         for j, lab in enumerate(metrics):
             cx = x0 + j * num_w
             center(lab, cx, top + head1_h, cx + num_w, top + head1_h + head2_h, font(14, True), "#c9c9d6")
+
+    x_overall = pad + team_w + len(sevs) * group_w
+    center("Overall", x_overall, top, x_overall + num_w, top + head1_h, font(16, True), "#ffffff")
+    center("SLA %", x_overall, top + head1_h, x_overall + num_w, top + head1_h + head2_h, font(14, True), "#c9c9d6")
 
     y = top + head1_h + head2_h
     for _, r in table.iterrows():
@@ -174,9 +207,12 @@ def severity_png(table, title, subtitle):
                     center(f"{pct:.1f}%" if has_pct else "—", cx, y, cx + num_w, y + row_h, font(16, True),
                            pct_color(pct if has_pct else None))
                 else:
-                    v = int(r[f"{sev} {m}"])
+                    v = metric_value(r, sev, m)
                     center("—" if v == 0 else f"{v:,}", cx, y, cx + num_w, y + row_h, font(16, is_all),
                            metric_color.get(m, dark))
+        pct_all = overall_pct(r)
+        center(f"{pct_all:.1f}%" if pct_all is not None else "—", x_overall, y, x_overall + num_w, y + row_h,
+               font(16, True), pct_color(pct_all))
         y += row_h
 
     buf = io.BytesIO()
