@@ -135,8 +135,11 @@ def compute_time_buckets(df):
         return buckets
     for _, row in df.iterrows():
         b = bucket_for(row["Hours Remaining"], row["Due Datetime"])
+        ticket = popup_ticket(row)
+        if b == BUCKET_BREACHED_TODAY and is_excluded_from_open_breached(ticket):
+            continue  # Escalated on Network / A2P: not counted as open breached
         buckets[b]["count"] += 1
-        buckets[b]["tickets"].append(popup_ticket(row))
+        buckets[b]["tickets"].append(ticket)
     return buckets
 
 
@@ -904,6 +907,7 @@ def popup_ticket(row):
         "status": row.get("Status") or "",
         "summary": row.get("Summary") or "",
         "due": due or "",
+        "escalation": row.get("Escalation Path") or "",
     }
 
 
@@ -976,6 +980,10 @@ def compute_resolved_counts(df):
     return {"within_sla": within_sla, "breached": breached, "pct": pct}
 
 
+def is_excluded_from_open_breached(ticket):
+    return breach_logic.is_excluded_open_breached(ticket.get("status"), ticket.get("escalation"))
+
+
 def resolved_sla_frame(resolved_data, resolved_errors, open_buckets):
     """Today's SLA by team and severity, in the Resolved History layout:
     resolved today (created today) plus open tickets that breached today.
@@ -989,7 +997,8 @@ def resolved_sla_frame(resolved_data, resolved_errors, open_buckets):
         columns=["Team", "Key", "Summary", "Severity", "Status", "Assignee", "Resolved Status", "Due Datetime"])
     open_keys = ["Team", "key", "summary", "severity", "status", "assignee", "due"]
     open_rows = [{**t, "Team": category} for category, bucket in open_buckets.items()
-                 for t in bucket[BUCKET_BREACHED_TODAY]["tickets"]]
+                 for t in bucket[BUCKET_BREACHED_TODAY]["tickets"]
+                 if not is_excluded_from_open_breached(t)]
     open_all = pd.DataFrame(open_rows, columns=open_keys).rename(columns={
         "key": "Key", "summary": "Summary", "severity": "Severity", "status": "Status",
         "assignee": "Assignee", "due": "Due"})

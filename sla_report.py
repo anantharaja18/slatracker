@@ -36,7 +36,8 @@ BUCKET_BREACHED_TODAY = "Breached Today"  # same meaning as in dashboard.py
 
 RESOLVED_FIELDS = ["summary", "status", "assignee", "created", "resolutiondate", config.SEVERITY_FIELD,
                    breach_logic.JIRA_SLA_FIELD]
-OPEN_FIELDS = ["summary", "status", "assignee", "created", config.SEVERITY_FIELD, breach_logic.JIRA_SLA_FIELD]
+OPEN_FIELDS = ["summary", "status", "assignee", "created", config.SEVERITY_FIELD, breach_logic.JIRA_SLA_FIELD,
+               breach_logic.ESCALATION_PATH_FIELD]
 
 
 def fetch_resolved_today():
@@ -80,6 +81,11 @@ def fetch_open_breached_today():
                 hours, due = result["hours_remaining"], result["due_date"]
                 if hours is None or pd.isna(hours) or due is None:
                     continue
+                path = issue["fields"].get(breach_logic.ESCALATION_PATH_FIELD)
+                path = path.get("value") if isinstance(path, dict) else path
+                if breach_logic.is_excluded_open_breached(
+                        (issue["fields"].get("status") or {}).get("name"), path):
+                    continue  # Escalated on Network / A2P: not counted
                 if hours * 60 < 0 and due.date() >= today:
                     rows.append({"Team": team, "Key": issue["key"], "Severity": result["severity"] or "N/A"})
     return pd.DataFrame(rows, columns=["Team", "Key", "Severity"])

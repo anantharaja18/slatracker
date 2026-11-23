@@ -71,6 +71,15 @@ def _extract_option_value(raw):
 
 
 JIRA_SLA_FIELD = "customfield_10031"  # Jira's "Time to resolution" SLA (Jira Service Management)
+ESCALATION_PATH_FIELD = "customfield_10883"
+SLA_EXCLUDED_ESCALATION_PATHS = {"network", "a2p"}
+
+
+def is_excluded_open_breached(status, escalation_path):
+    """Escalated tickets on the Network or A2P path are left out of the open-breached
+    count and SLA % of the SLA by severity views and the Teams report."""
+    return (str(status or "").strip().lower() == "escalated"
+            and str(escalation_path or "").strip().lower() in SLA_EXCLUDED_ESCALATION_PATHS)
 
 
 def _sla_cycle(issue):
