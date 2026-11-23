@@ -199,8 +199,8 @@ def workflow_payload(parts):
         "firstRowAsHeader": True,
         "verticalCellContentAlignment": "center",
         # Widths are shares of the card width (wide enough that no label is cut off):
-        # Team 7, Sev 4, Resolved 5, Within 4, Late 4, Open 5, SLA % 5.
-        "columns": [{"width": 7}, {"width": 4}, {"width": 5}, {"width": 4}, {"width": 4}, {"width": 5}, {"width": 5}],
+        # Team 9, Sev 6, Resolved 11, Within 10, Late 7, Open 7, SLA % 7.
+        "columns": [{"width": 9}, {"width": 6}, {"width": 11}, {"width": 10}, {"width": 7}, {"width": 7}, {"width": 7}],
         "rows": table_rows,
     }
     card_body = [
