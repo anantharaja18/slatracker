@@ -156,9 +156,10 @@ def sla_by_created(df, open_rows, start, end):
             late = int((rs["sla"] == LATE).sum())
             open_n = int((o_part["severity"] == sev).sum())
             judged = within + late + open_n
-            row.update({f"{sev} Resolved": len(rs), f"{sev} Within SLA": within,
+            row.update({f"{sev} Resolved": judged, f"{sev} Within SLA": within,
                         f"{sev} Resolved late": late, f"{sev} Open breached": open_n,
                         f"{sev} SLA %": round(within / judged * 100, 1) if judged else None})
+        row["Total Resolved"] = sum(row[f"{sev} Resolved"] for sev in config.SLA_MINUTES)
         rows.append(row)
     return pd.DataFrame(rows)
 

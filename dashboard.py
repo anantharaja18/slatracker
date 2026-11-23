@@ -711,11 +711,12 @@ def resolved_sla_frame(resolved_data, resolved_errors, open_buckets):
             counts = compute_resolved_counts(res_sev)
             within, late, open_n = counts["within_sla"], counts["breached"], len(open_sev)
             judged = within + late + open_n
-            row[f"{sev} Resolved"] = len(res_sev)
+            row[f"{sev} Resolved"] = judged  # Within SLA + Breached SLA (resolved late + open breached)
             row[f"{sev} Within SLA"] = within
             row[f"{sev} Resolved late"] = late
             row[f"{sev} Open breached"] = open_n
             row[f"{sev} SLA %"] = round(within / judged * 100, 1) if judged else None
+        row["Total Resolved"] = sum(row[f"{sev} Resolved"] for sev in config.SLA_MINUTES)
         rows.append(row)
     return pd.DataFrame(rows), resolved_all, open_all
 

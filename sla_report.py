@@ -113,7 +113,7 @@ def summary_rows(resolved, open_breached):
             open_n = int((opn["Severity"] == sev).sum())
             judged = within + late + open_n
             rows.append({
-                "Team": team, "Sev": sev, "Resolved": len(res_sev), "Within": within,
+                "Team": team, "Sev": sev, "Resolved": within + late + open_n, "Within": within,
                 "Late": late, "Open": open_n,
                 "SLA": round(within / judged * 100, 1) if judged else None,
             })
@@ -127,7 +127,7 @@ def breached_count(r):
 
 def format_table(rows):
     """Fixed-width table for a Teams code block."""
-    head = f"{'Team':<14}{'Sev':<7}{'Total Resolved':>15}{'Within SLA':>12}{'Breached SLA':>14}{'SLA %':>8}"
+    head = f"{'Team':<14}{'Sev':<7}{'Resolved':>15}{'Within SLA':>12}{'Breached SLA':>14}{'SLA %':>8}"
     lines = [head, "-" * len(head)]
     for i, r in enumerate(rows):
         if r["Team"] == "All teams" and rows[i - 1]["Team"] != "All teams":
@@ -179,7 +179,7 @@ def workflow_payload(parts):
 
     def cell(text, column, bold=False, emphasis=False, color=None):
         text_block = {
-            "type": "TextBlock", "text": str(text), "size": "Small", "wrap": False,
+            "type": "TextBlock", "text": str(text), "size": "Small", "wrap": True,
             "weight": "Bolder" if bold else "Default",
             "horizontalAlignment": "Left" if column < 2 else "Right",
         }
@@ -187,7 +187,7 @@ def workflow_payload(parts):
             text_block["color"] = color
         return {"type": "TableCell", "items": [text_block], "style": "emphasis" if emphasis else "default"}
 
-    header = ["Team", "Sev", "Total Resolved", "Within SLA", "Breached SLA", "SLA %"]
+    header = ["Team", "Sev", "Resolved", "Within SLA", "Breached SLA", "SLA %"]
     table_rows = [{"type": "TableRow", "style": "accent",
                    "cells": [cell(v, i, bold=True) for i, v in enumerate(header)]}]
     for r in parts["rows"]:
@@ -212,8 +212,8 @@ def workflow_payload(parts):
         "firstRowAsHeader": True,
         "verticalCellContentAlignment": "center",
         # Widths are shares of the card width (wide enough that no label is cut off):
-        # Team 9, Sev 6, Total Resolved 12, Within SLA 11, Breached SLA 11, SLA % 8.
-        "columns": [{"width": 9}, {"width": 6}, {"width": 12}, {"width": 11}, {"width": 11}, {"width": 8}],
+        # Team 17, Sev 14, Total Resolved 16, Within SLA 15, Breached SLA 16, SLA % 14. Long text wraps.
+        "columns": [{"width": 17}, {"width": 14}, {"width": 16}, {"width": 15}, {"width": 16}, {"width": 14}],
         "rows": table_rows,
     }
     card_body = [
@@ -517,7 +517,7 @@ def email_html(parts):
     """The summary table as an HTML email body (no local file paths)."""
     cell_style = "padding:4px 8px;border:1px solid #cccccc;"
     head = "".join(f"<th style='{cell_style}background:#20202c;color:#ffffff;'>{h}</th>"
-                   for h in ["Team", "Sev", "Total Resolved", "Within SLA", "Breached SLA", "SLA %"])
+                   for h in ["Team", "Sev", "Resolved", "Within SLA", "Breached SLA", "SLA %"])
     body_rows = []
     for r in parts["rows"]:
         if r["Team"] == "Order Fallout" and r["Sev"] == "Sev-1" and not (r["Resolved"] or r["Within"] or r["Late"]):

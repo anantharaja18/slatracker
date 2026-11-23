@@ -71,6 +71,9 @@ def metrics_of(table=None):
 def metric_value(r, sev, metric):
     """One count for a team row and severity. Breached SLA = resolved late + open
     breached (open breached counts only when the table has that column)."""
+    if metric == "Resolved":
+        # Total Resolved = Within SLA + Breached SLA (resolved late + open breached)
+        return int(r[f"{sev} Within SLA"]) + metric_value(r, sev, "Breached SLA")
     if metric == "Breached SLA":
         open_col = f"{sev} Open breached"
         return int(r[f"{sev} Resolved late"]) + (int(r[open_col]) if open_col in r.index else 0)
@@ -92,6 +95,11 @@ def sla_cell(pct):
     return (f'<span class="asg-sla"><span class="asg-slabar"><span style="width:{min(pct, 100):.0f}%;'
             f'background:{color};"></span></span><span class="asg-pill" style="color:{color};'
             f'border-color:{color}66;background:{color}1f;">{pct:.1f}%</span></span>')
+
+
+def overall_total(r):
+    """Total Resolved across all severities = Within SLA + Breached SLA for each severity."""
+    return sum(metric_value(r, sev, "Resolved") for sev in config.SLA_MINUTES)
 
 
 def overall_pct(r):
@@ -116,8 +124,8 @@ def sla_severity_html(table, wrap_breached=None):
     head = '<th>Team</th>' + "".join(
         f'<th colspan="{len(metrics)}" style="text-align:center;">{sev} &middot; SLA {mins // 60} h</th>'
         for sev, mins in sevs)
-    subhead = '<th></th>' + "".join(f'<th>{m}</th>' for _ in sevs for m in metrics) + '<th>SLA %</th>'
-    head += '<th>Overall</th>'
+    subhead = '<th></th>' + "".join(f'<th>{m}</th>' for _ in sevs for m in metrics) + '<th>Total Resolved</th><th>SLA %</th>'
+    head += '<th colspan="2" style="text-align:center;">Overall</th>'
 
     def cell_html(r, sev, m):
         if m == "SLA %":
@@ -133,7 +141,7 @@ def sla_severity_html(table, wrap_breached=None):
         is_all = r["Team"] == "All teams"
         dot = "" if is_all else f'<span class="dot" style="background:{TEAM_COLOR.get(r["Team"], TEXT_MUTED)};"></span>'
         cells = "".join(f'<td>{cell_html(r, sev, m)}</td>' for sev, _mins in sevs for m in metrics)
-        cells += f'<td>{sla_cell(overall_pct(r))}</td>'
+        cells += f'<td>{count_cell(overall_total(r))}</td><td>{sla_cell(overall_pct(r))}</td>'
         cls = ' class="asg-grand"' if is_all else ""
         body.append(f'<tr{cls}><td><span class="asg-name">{dot}{html.escape(str(r["Team"]))}</span></td>{cells}</tr>')
     wrap_cls = "asg-wrap asg-popups" if wrap_breached else "asg-wrap"
@@ -160,7 +168,7 @@ def severity_png(table, title, subtitle):
     pad, team_w, num_w = 24, 240, 118
     head1_h, head2_h, row_h = 44, 36, 44
     group_w = num_w * len(metrics)
-    width = pad * 2 + team_w + group_w * len(sevs) + num_w
+    width = pad * 2 + team_w + group_w * len(sevs) + num_w * 2
     top = pad + 80
     height = top + head1_h + head2_h + row_h * len(table) + pad
     img = Image.new("RGB", (width, height), "#ffffff")
@@ -182,8 +190,9 @@ def severity_png(table, title, subtitle):
             center(lab, cx, top + head1_h, cx + num_w, top + head1_h + head2_h, font(14, True), "#c9c9d6")
 
     x_overall = pad + team_w + len(sevs) * group_w
-    center("Overall", x_overall, top, x_overall + num_w, top + head1_h, font(16, True), "#ffffff")
-    center("SLA %", x_overall, top + head1_h, x_overall + num_w, top + head1_h + head2_h, font(14, True), "#c9c9d6")
+    center("Overall", x_overall, top, x_overall + num_w * 2, top + head1_h, font(16, True), "#ffffff")
+    center("Total Resolved", x_overall, top + head1_h, x_overall + num_w, top + head1_h + head2_h, font(14, True), "#c9c9d6")
+    center("SLA %", x_overall + num_w, top + head1_h, x_overall + num_w * 2, top + head1_h + head2_h, font(14, True), "#c9c9d6")
 
     y = top + head1_h + head2_h
     for _, r in table.iterrows():
@@ -211,7 +220,10 @@ def severity_png(table, title, subtitle):
                     center("—" if v == 0 else f"{v:,}", cx, y, cx + num_w, y + row_h, font(16, is_all),
                            metric_color.get(m, dark))
         pct_all = overall_pct(r)
-        center(f"{pct_all:.1f}%" if pct_all is not None else "—", x_overall, y, x_overall + num_w, y + row_h,
+        total_all = overall_total(r)
+        center("—" if total_all == 0 else f"{total_all:,}", x_overall, y, x_overall + num_w, y + row_h,
+               font(16, is_all), dark)
+        center(f"{pct_all:.1f}%" if pct_all is not None else "—", x_overall + num_w, y, x_overall + num_w * 2, y + row_h,
                font(16, True), pct_color(pct_all))
         y += row_h
 
