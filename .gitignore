@@ -21,3 +21,6 @@ venv/
 
 # Ticket Trend Analysis cache
 trend_data/
+
+report_log.json
+report_log.json.tmp

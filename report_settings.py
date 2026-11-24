@@ -13,6 +13,7 @@ import threading
 PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "report_settings.json")
 DEFAULTS = {"webhook_url": "", "enabled": False, "eod_enabled": False, "interval_hours": 1,
             "email_hourly_enabled": False, "email_eod_enabled": False,
+            "productivity_hourly_enabled": False, "productivity_eod_enabled": False,
             "email_recipients": None, "email_log": {}, "email_interval_hours": 1}  # None = use SMTP_TO from .env; a list = saved in the admin panel
 INTERVAL_CHOICES = (1, 2, 3, 4)
 _lock = threading.Lock()

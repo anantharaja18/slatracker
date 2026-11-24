@@ -21,6 +21,8 @@ from streamlit_autorefresh import st_autorefresh
 import config
 import jira_client
 import breach_logic
+import productivity_report
+import report_log
 import report_settings
 import sla_report
 import smtp_mail
@@ -1467,6 +1469,15 @@ with st.expander("Report Settings (Admin)"):
                               value=saved["email_eod_enabled"], key="report_email_eod")
         if email_eod != saved["email_eod_enabled"]:
             report_settings.save({**report_settings.load(), "email_eod_enabled": email_eod})
+        st.markdown("**Productivity email (resolved by assignee, Excel attached)**")
+        prod_hourly = st.toggle("Send Hourly Productivity Report at the email frequency above, 08:00 to 23:00 Puerto Rico time",
+                                value=saved["productivity_hourly_enabled"], key="report_prod_hourly")
+        if prod_hourly != saved["productivity_hourly_enabled"]:
+            report_settings.save({**report_settings.load(), "productivity_hourly_enabled": prod_hourly})
+        prod_eod = st.toggle("Send Productivity Report - EOD at 00:00:00 Jira time (previous full day, Excel attached)",
+                             value=saved["productivity_eod_enabled"], key="report_prod_eod")
+        if prod_eod != saved["productivity_eod_enabled"]:
+            report_settings.save({**report_settings.load(), "productivity_eod_enabled": prod_eod})
         recipients_now = smtp_mail.live_recipients()
         recipients_text = st.text_area("Email recipients (one per line, or separated by ;)",
                                        value="\n".join(recipients_now), key="report_recipients", height=150,
@@ -1483,7 +1494,9 @@ with st.expander("Report Settings (Admin)"):
                 report_settings.save({**report_settings.load(), "email_recipients": entries})
                 st.success(f"Saved {len(entries)} recipient(s)")
         email_log = saved.get("email_log") or {}
-        for kind, label in (("hourly", "Last hourly email"), ("eod", "Last end-of-day email")):
+        for kind, label in (("hourly", "Last hourly email"), ("eod", "Last end-of-day email"),
+                            ("productivity_hourly", "Last hourly productivity email"),
+                            ("productivity_eod", "Last productivity end-of-day email")):
             entry = email_log.get(kind)
             if not entry:
                 st.caption(f"{label}: none sent yet")
@@ -1511,6 +1524,13 @@ with st.expander("Report Settings (Admin)"):
                 st.success("Test email sent (test address only)")
             except Exception as exc:
                 st.error(f"Test email not sent: {exc}")
+        if st.button("Send productivity test email to the test address", key="report_prod_test",
+                     help="Sends the Hourly Productivity Report to SMTP_TEST_TO only."):
+            try:
+                productivity_report.send_test()
+                st.success("Productivity test email sent (test address only)")
+            except Exception as exc:
+                st.error(f"Productivity test email not sent: {exc}")
         if st.button("Send end-of-day report now", key="report_eod_now"):
             try:
                 scheduler.send_eod_now()
@@ -1544,6 +1564,8 @@ with st.expander("Report Settings (Admin)"):
                     "email_interval_hours": st.session_state["report_email_interval"],
                     "email_hourly_enabled": st.session_state["report_email_hourly"],
                     "email_eod_enabled": st.session_state["report_email_eod"],
+                    "productivity_hourly_enabled": st.session_state["report_prod_hourly"],
+                    "productivity_eod_enabled": st.session_state["report_prod_eod"],
                     "email_recipients": entries,
                 })
                 st.success(f"All settings saved ({len(entries)} recipient(s)). "
@@ -1552,3 +1574,13 @@ with st.expander("Report Settings (Admin)"):
         last_text = f"{status['last']:%d %b %H:%M %Z}" if status["last"] else "none yet"
         st.caption(f"Next report: {next_text} · Last report: {last_text}"
                    + (f" · Last error: {status['last_error']}" if status["last_error"] else ""))
+        st.divider()
+        st.markdown("**Report log** (every Teams and email send, newest first; the file is report_log.json)")
+        log_entries = report_log.recent(100)
+        if log_entries:
+            st.dataframe(pd.DataFrame([{"Time": e["at"], "Report": e["name"],
+                                        "Result": "Sent" if e["ok"] else "FAILED", "Detail": e["detail"]}
+                                       for e in log_entries]),
+                         hide_index=True, width="stretch")
+        else:
+            st.caption("No reports have been sent from this dashboard yet.")

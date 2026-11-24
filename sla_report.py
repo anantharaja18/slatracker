@@ -28,11 +28,13 @@ import requests
 import breach_logic
 import config
 import jira_client
+import report_log
 import report_settings
 import sla_comments
 import smtp_mail
 
 REPORT_TZ = ZoneInfo("America/Puerto_Rico")
+TEAMS_NAME, TEAMS_EOD_NAME = "Teams report", "Teams report (end of day)"
 BUCKET_BREACHED_TODAY = "Breached Today"  # same meaning as in dashboard.py
 
 RESOLVED_FIELDS = ["summary", "status", "assignee", "created", "resolutiondate", config.SEVERITY_FIELD,
@@ -265,18 +267,25 @@ def workflow_payload(parts):
 
 def post_report(dry_run=False):
     """Build the report and post it to the saved Workflow link. Returns True if posted."""
-    parts = build_parts()
     if dry_run:
+        parts = build_parts()
         print(parts["title"])
         print(parts["as_of"])
         print(parts["table"])
         print(parts["footnote"])
         return True
-    url = report_settings.webhook_url()
-    if not url:
-        raise RuntimeError("No Teams workflow link is saved yet")
-    resp = requests.post(url, json=workflow_payload(parts), timeout=30)
-    resp.raise_for_status()
+    try:
+        parts = build_parts()
+        url = report_settings.webhook_url()
+        if not url:
+            raise RuntimeError("No Teams workflow link is saved yet")
+        resp = requests.post(url, json=workflow_payload(parts), timeout=30)
+        if resp.status_code >= 300:
+            raise RuntimeError(f"Teams replied HTTP {resp.status_code}: {resp.text[:300]}")
+    except Exception as exc:
+        report_log.record(TEAMS_NAME, False, exc)
+        raise
+    report_log.record(TEAMS_NAME, True, f"HTTP {resp.status_code}")
     print(f"[sla_report] Posted to chat at {datetime.now(REPORT_TZ):%Y-%m-%d %H:%M %Z}")
     return True
 
@@ -461,6 +470,7 @@ def _log_email(kind, ok, detail):
     log = dict(settings.get("email_log") or {})
     log[kind] = {"at": datetime.now(REPORT_TZ).strftime("%d %b %H:%M %Z"), "ok": ok, "detail": detail}
     report_settings.save({**settings, "email_log": log})
+    report_log.record(report_log.EMAIL_NAMES.get(kind, kind), ok, detail)
 
 
 def send_hourly_email(to=None):
@@ -546,12 +556,18 @@ def email_body(title, as_of, frame, png):
 
 def post_eod_report(day=None):
     day = day or previous_day()
-    parts = build_eod_report(day)
-    url = report_settings.webhook_url()
-    if not url:
-        raise RuntimeError("No Teams workflow link is saved yet")
-    resp = requests.post(url, json=workflow_payload(parts), timeout=60)
-    resp.raise_for_status()
+    try:
+        parts = build_eod_report(day)
+        url = report_settings.webhook_url()
+        if not url:
+            raise RuntimeError("No Teams workflow link is saved yet")
+        resp = requests.post(url, json=workflow_payload(parts), timeout=60)
+        if resp.status_code >= 300:
+            raise RuntimeError(f"Teams replied HTTP {resp.status_code}: {resp.text[:300]}")
+    except Exception as exc:
+        report_log.record(TEAMS_EOD_NAME, False, exc)
+        raise
+    report_log.record(TEAMS_EOD_NAME, True, f"HTTP {resp.status_code}, covers {day}")
     print(f"[sla_report] End-of-day report for {day} posted to chat at {datetime.now(REPORT_TZ):%Y-%m-%d %H:%M %Z}")
 
     if report_settings.load()["email_eod_enabled"]:
@@ -631,47 +647,70 @@ class ReportScheduler:
             raise
         self._record()
 
+    @staticmethod
+    def _plan(s, now):
+        """(time, kind) for every report that is switched on, next time it is due."""
+        options = []
+        if s["enabled"]:
+            options.append((next_slot(now, report_settings.interval_hours(s)), "slot"))
+        if s["eod_enabled"]:
+            options.append((next_eod(now), "eod"))
+        if s["email_hourly_enabled"]:
+            options.append((next_email_slot(now, report_settings.email_interval_hours(s)), "email"))
+        if s["productivity_hourly_enabled"]:
+            options.append((next_email_slot(now, report_settings.email_interval_hours(s)), "productivity"))
+        if s["productivity_eod_enabled"]:
+            options.append((next_eod(now), "productivity_eod"))
+        return options
+
+    @staticmethod
+    def _schedule_key(s):
+        """Settings that change the plan. Any change makes the loop re-plan."""
+        return (s["enabled"], s["eod_enabled"], s["email_hourly_enabled"], s["productivity_hourly_enabled"],
+                s["productivity_eod_enabled"], report_settings.interval_hours(s),
+                report_settings.email_interval_hours(s))
+
     def run(self):
         while True:
             s = report_settings.load()
             now = datetime.now(REPORT_TZ)
-            options = []
-            if s["enabled"]:
-                options.append((next_slot(now, report_settings.interval_hours(s)), "slot"))
-            if s["eod_enabled"]:
-                options.append((next_eod(now), "eod"))
-            if s["email_hourly_enabled"]:
-                options.append((next_email_slot(now, report_settings.email_interval_hours(s)), "email"))
+            options = self._plan(s, now)
             if not options:
                 self.status["next"] = None
                 time.sleep(30)
                 continue
-            when, kind = min(options)
+            when = min(t for t, _ in options)
+            # Every report due at this same time runs (e.g. the SLA email and the productivity email).
+            kinds = [kind for t, kind in options if t == when]
             self.status["next"] = when
-            # Wake every 30 seconds; re-plan if either switch changes.
+            key = self._schedule_key(s)
+            # Wake every 30 seconds; re-plan if any switch or frequency changes.
             while datetime.now(REPORT_TZ) < when:
-                cur = report_settings.load()
-                if (cur["enabled"] != s["enabled"] or cur["eod_enabled"] != s["eod_enabled"]
-                        or cur["email_hourly_enabled"] != s["email_hourly_enabled"]
-                        or report_settings.email_interval_hours(cur) != report_settings.email_interval_hours(s)
-                        or report_settings.interval_hours(cur) != report_settings.interval_hours(s)):
+                if self._schedule_key(report_settings.load()) != key:
                     break
                 time.sleep(min(30, max(1.0, (when - datetime.now(REPORT_TZ)).total_seconds())))
-            cur = report_settings.load()
-            still_on = {"eod": cur["eod_enabled"], "email": cur["email_hourly_enabled"]}.get(kind, cur["enabled"])
-            if datetime.now(REPORT_TZ) < when or not still_on:
+            if datetime.now(REPORT_TZ) < when or self._schedule_key(report_settings.load()) != key:
                 continue
-            try:
-                if kind == "eod":
-                    # Sent at 00:00:00 on the 20th, so the report covers the 19th.
-                    self.send_eod_now(when.date() - timedelta(days=1))
-                elif kind == "email":
-                    send_hourly_email()
-                    self._record()
-                else:
-                    self.send_now()
-            except Exception as exc:
-                print(f"[sla_report] Report failed: {exc}")
+            for kind in kinds:
+                try:
+                    if kind == "eod":
+                        # Sent at 00:00:00 on the 20th, so the report covers the 19th.
+                        self.send_eod_now(when.date() - timedelta(days=1))
+                    elif kind == "email":
+                        send_hourly_email()
+                        self._record()
+                    elif kind == "productivity":
+                        import productivity_report
+                        productivity_report.send_hourly()
+                        self._record()
+                    elif kind == "productivity_eod":
+                        import productivity_report
+                        productivity_report.send_eod(when.date() - timedelta(days=1))
+                        self._record()
+                    else:
+                        self.send_now()
+                except Exception as exc:
+                    print(f"[sla_report] Report failed ({kind}): {exc}")
 
 
 if __name__ == "__main__":
