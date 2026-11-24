@@ -536,19 +536,9 @@ def send_test_email():
 
 
 def email_body(title, as_of, frame, png):
-    """Email body: title, as-of line, the picture, the same table as HTML, and a note
-    about the Excel attachment (no local file paths)."""
-    cell_style = "padding:4px 8px;border:1px solid #cccccc;"
-    head = "".join(f"<th style='{cell_style}background:#20202c;color:#ffffff;'>{h}</th>"
-                   for h in _sla_headers())
-    body_rows = []
-    for _, r in frame.iterrows():
-        bold = "font-weight:bold;" if r["Team"] == config.TOTAL_LABEL else ""
-        body_rows.append("<tr>" + "".join(f"<td style='{cell_style}{bold}'>{html.escape(str(v))}</td>"
-                                          for v in _sla_values(r)) + "</tr>")
+    """Email body: title, as-of line, the picture (the table is in the picture, so no
+    second copy), and a note about the Excel attachment (no local file paths)."""
     return (f"<p><b>{html.escape(title)}</b><br>{html.escape(as_of)}</p>{_picture_html(png)}"
-            f"<table style='border-collapse:collapse;font-family:Arial;font-size:13px;'>"
-            f"<tr>{head}</tr>{''.join(body_rows)}</table>"
             "<p>The full ticket list is in the attached Excel file.</p>")
 
 
