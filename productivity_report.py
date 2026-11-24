@@ -179,7 +179,7 @@ def send_hourly(to=None):
         today = jira_now.date()
         title = f"Resolved by Assignee — Today's Inflow — {jira_now:%d %b %Y}"
         as_of = f"As of {now_pr:%H:%M} Puerto Rico time ({jira_now:%H:%M %Z} Jira time)"
-        _send(f"Hourly Productivity Report - {sla_report.ordinal_day(today)} - as of {now_pr:%H:%M} PR time",
+        _send(sla_report.email_subject("Hourly Productivity Report", today, f"as of {now_pr:%H:%M} PR time"),
               _recipients(to), title, as_of, today, today,
               f"{today:%d %b %Y} (today so far)",
               f"Productivity_By_Assignee_{today:%Y-%m-%d}_{now_pr:%H%M}.xlsx")
@@ -191,7 +191,7 @@ def send_eod(day, to=None):
     def action():
         title = f"Resolved by Assignee — Resolved on {day:%d %b %Y}"
         as_of = f"Full day {day:%d %b %Y} (Jira time)"
-        _send(f"Productivity Report - EOD - {sla_report.ordinal_day(day)}",
+        _send(sla_report.email_subject("Daily Productivity Report", day),
               _recipients(to), title, as_of, day, day,
               f"{day:%d %b %Y} (full day)", f"Productivity_By_Assignee_{day:%Y-%m-%d}.xlsx")
     _logged(EOD_KIND, to, action)

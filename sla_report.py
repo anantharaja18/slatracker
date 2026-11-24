@@ -418,12 +418,10 @@ def ordinal_day(day):
     return f"{n}{suffix} {day:%b %Y}"
 
 
-def email_subject(day, suffix=""):
-    """Subject from SMTP_SUBJECT_PREFIX, with "Previous Days Date" replaced by the report date."""
-    prefix = os.environ.get("SMTP_SUBJECT_PREFIX", "").strip() or \
-        "Daily Ticket Resolution & SLA Report- Previous Days Date"
-    text = prefix.replace("Previous Days Date", ordinal_day(day)).replace("Report- ", "Report - ")
-    return text + (f" - {suffix}" if suffix else "")
+def email_subject(name, day, suffix=""):
+    """Subject: the report's name, the report date, then an optional suffix,
+    e.g. "Hourly SLA Report - 24th Nov 2026 - as of 11:00 PR time"."""
+    return f"{name} - {ordinal_day(day)}" + (f" - {suffix}" if suffix else "")
 
 
 def _summary_sheet(frame):
@@ -498,7 +496,7 @@ def _send_hourly_email(to=None):
     png = png_summary(rows, title, as_of)
     xlsx = today_excel(rows, opn, today)
     body = email_body(title, as_of, rows, png)
-    smtp_mail.send(email_subject(today, f"as of {now_pr:%H:%M} PR time"), body,
+    smtp_mail.send(email_subject("Hourly SLA Report", today, f"as of {now_pr:%H:%M} PR time"), body,
                    to or smtp_mail.live_recipients(), png=png,
                    attachment=(f"SLA_Today_Inflow_{today:%Y-%m-%d}_{now_pr:%H%M}.xlsx", xlsx))
 
@@ -522,7 +520,7 @@ def _send_eod_email(day, parts, to=None):
     title = f"SLA by Severity — Resolved on {day:%d %b %Y}"
     png = png_summary(parts["rows"], title, parts["as_of"])
     body = email_body(title, parts["as_of"], parts["rows"], png)
-    smtp_mail.send(email_subject(day), body, to or smtp_mail.live_recipients(), png=png,
+    smtp_mail.send(email_subject("Daily SLA Report", day), body, to or smtp_mail.live_recipients(), png=png,
                    attachment=(os.path.basename(parts["path"]), xlsx))
 
 
