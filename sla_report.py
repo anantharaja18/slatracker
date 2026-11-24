@@ -173,7 +173,7 @@ def build_parts():
     frame = project_frame(fetch_resolved_today(), fetch_open_breached_today())
     sev_text = ", ".join(f"{s} {m // 60} h" for s, m in config.SLA_MINUTES.items())
     return {
-        "title": f"SLA by Severity — Today's Inflow — {jira_now:%d %b %Y}",
+        "title": f"Hourly SLA by Severity — Today's Inflow — {jira_now:%d %b %Y}",
         "as_of": f"As of {now_pr:%H:%M} Puerto Rico time ({jira_now:%H:%M %Z} Jira time)",
         "table": format_table(frame),
         "rows": frame,
@@ -402,7 +402,7 @@ def build_eod_report(day):
             "Resolved from Past Inflow": sheet[~same_day],
         }))
     return {
-        "title": f"End of day SLA report — {day:%d %b %Y}",
+        "title": f"Daily SLA by Severity — Resolved on {day:%d %b %Y}",
         "as_of": (f"Tickets resolved {day:%d %b %Y} 00:00:00 to 23:59:59 Jira time ({breach_logic.JIRA_TZ}) · "
                   f"{len(resolved_day)} resolved tickets"),
         "rows": frame,
