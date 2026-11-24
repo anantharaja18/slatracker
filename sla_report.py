@@ -239,8 +239,8 @@ def workflow_payload(parts):
         "firstRowAsHeader": True,
         "verticalCellContentAlignment": "center",
         # Shares of the card width: Project, then Met / Not met / Met % for Sev-1 and Sev-2, then Overall.
-        "columns": [{"width": 30}, {"width": 20}, {"width": 20}, {"width": 20},
-                    {"width": 20}, {"width": 20}, {"width": 20}, {"width": 20}],
+        "columns": [{"width": 60}, {"width": 80}, {"width": 80}, {"width": 80},
+                    {"width": 80}, {"width": 80}, {"width": 80}, {"width": 80}],
         "rows": table_rows,
     }
     card_body = [
