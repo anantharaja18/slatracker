@@ -1523,6 +1523,31 @@ with st.expander("Report Settings (Admin)"):
                 st.success("Report sent to Prodapt Incident Managers")
             except Exception as exc:
                 st.error(f"Not sent: {exc}")
+        st.divider()
+        st.caption("Save all settings writes every setting on this panel in one go: the link (if pasted), "
+                   "the frequencies, all four switches and the recipient list.")
+        if st.button("Save all settings", key="report_save_all", type="primary"):
+            entries = smtp_mail.split_recipients(st.session_state.get("report_recipients", ""))
+            bad = [e for e in entries if not smtp_mail.valid_address(e)]
+            if not entries:
+                st.warning("Add at least one recipient before saving")
+            elif bad:
+                st.error("Not a valid email address: " + ", ".join(bad))
+            else:
+                typed_link = st.session_state.get("report_link", "").strip()
+                report_settings.save({
+                    **report_settings.load(),
+                    "webhook_url": typed_link or saved["webhook_url"],
+                    "interval_hours": st.session_state["report_interval"],
+                    "enabled": st.session_state["report_enabled"],
+                    "eod_enabled": st.session_state["report_eod_enabled"],
+                    "email_interval_hours": st.session_state["report_email_interval"],
+                    "email_hourly_enabled": st.session_state["report_email_hourly"],
+                    "email_eod_enabled": st.session_state["report_email_eod"],
+                    "email_recipients": entries,
+                })
+                st.success(f"All settings saved ({len(entries)} recipient(s)). "
+                           "The schedule picks them up within 30 seconds.")
         next_text = f"{status['next']:%d %b %H:%M %Z}" if status["next"] and enabled else "off"
         last_text = f"{status['last']:%d %b %H:%M %Z}" if status["last"] else "none yet"
         st.caption(f"Next report: {next_text} · Last report: {last_text}"
