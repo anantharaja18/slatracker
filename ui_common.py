@@ -6,6 +6,7 @@ Excel styling.
 """
 
 import threading
+import time
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -156,6 +157,32 @@ def jira_url(key):
 @st.cache_resource
 def _sync_lock():
     return threading.Lock()
+
+
+BACKGROUND_SYNC_MINUTES = 5  # how often the dashboard refreshes the local Jira copy
+# The last background attempt, shown on the Historical page: when it ran and what it returned.
+BACKGROUND_STATUS = {"started": None, "last_try": None, "result": "not run yet"}
+
+
+@st.cache_resource(show_spinner=False)
+def start_background_sync():
+    """Refreshes the local Jira copy every BACKGROUND_SYNC_MINUTES while the dashboard runs,
+    so the Historical page, the trend page and the productivity emails never lag far behind
+    Jira. One thread per dashboard process; the sync lock stops two syncs overlapping."""
+    def loop():
+        BACKGROUND_STATUS["started"] = datetime.now()
+        while True:
+            BACKGROUND_STATUS["last_try"] = datetime.now()
+            try:
+                BACKGROUND_STATUS["result"] = trend_store.sync()
+            except Exception as exc:
+                BACKGROUND_STATUS["result"] = f"failed: {exc}"
+                print(f"[trend_store] Background Jira sync failed: {exc}")
+            print(f"[trend_store] Background sync: {BACKGROUND_STATUS['result']}")
+            time.sleep(BACKGROUND_SYNC_MINUTES * 60)
+
+    threading.Thread(target=loop, name="jira-sync", daemon=True).start()
+    return True
 
 
 def ensure_fresh(force=False):

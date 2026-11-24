@@ -209,7 +209,7 @@ def workflow_payload(parts):
         text_block = {
             "type": "TextBlock", "text": str(text), "size": "Small", "wrap": True,
             "weight": "Bolder" if bold else "Default",
-            "horizontalAlignment": "Left" if column < 2 else "Right",
+            "horizontalAlignment": "Center",
         }
         if color:
             text_block["color"] = color
@@ -239,8 +239,8 @@ def workflow_payload(parts):
         "firstRowAsHeader": True,
         "verticalCellContentAlignment": "center",
         # Shares of the card width: Project, then Met / Not met / Met % for Sev-1 and Sev-2, then Overall.
-        "columns": [{"width": 21}, {"width": 10}, {"width": 11}, {"width": 11},
-                    {"width": 10}, {"width": 11}, {"width": 11}, {"width": 12}],
+        "columns": [{"width": 30}, {"width": 20}, {"width": 20}, {"width": 20},
+                    {"width": 20}, {"width": 20}, {"width": 20}, {"width": 20}],
         "rows": table_rows,
     }
     card_body = [

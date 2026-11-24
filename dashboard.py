@@ -1399,6 +1399,7 @@ def report_scheduler():
 
 
 scheduler = report_scheduler()
+ui_common.start_background_sync()  # keeps the local Jira copy within 5 minutes of Jira
 REPORT_PIN = os.environ.get("REPORT_PANEL_PIN", "").strip()
 
 

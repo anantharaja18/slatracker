@@ -177,6 +177,10 @@ ui.ensure_fresh(force=force)
 boot.empty()
 st.session_state["resolved_page_loaded"] = True
 last_sync = trend_store.last_sync_time()
+bg = ui.BACKGROUND_STATUS
+st.caption((f"Jira data last synced {last_sync:%d %b %Y %H:%M:%S}" if last_sync else "Jira data not synced yet.")
+           + f" · background refresh every {ui.BACKGROUND_SYNC_MINUTES} min, last attempt "
+           + (f"{bg['last_try']:%H:%M:%S} ({bg['result']})" if bg["last_try"] else "not yet"))
 data_loader = ui.loading_if_new("resolved_loaded_sync", last_sync.isoformat() if last_sync else None,
                                 "Loading resolved tickets&hellip; a year of Retail, SAC, B2B and Order Fallout")
 resolved = load_data(last_sync.isoformat()) if last_sync else pd.DataFrame()
