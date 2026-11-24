@@ -2,12 +2,13 @@
 Shared SLA-by-severity view: the HTML table, the PNG image and the styles used
 by the dashboard and by the Resolved Tickets History page.
 
-Input is a DataFrame with one row per team (plus "All teams" last). For each
-severity in config.SLA_MINUTES (e.g. Sev-1, Sev-2) it has these columns:
-    "<sev> Resolved", "<sev> Within SLA", "<sev> Resolved late", "<sev> SLA %"
-and, optionally, "<sev> Open breached" (the dashboard shows it; the history
-page does not, because it only looks at resolved tickets). The table shows
-Resolved, Within SLA, Breached SLA (= resolved late + open breached) and SLA %.
+Input is a DataFrame with one row per project (see config.PROJECT_GROUPS) plus
+the Total row (config.TOTAL_LABEL). For each severity in config.SLA_MINUTES
+(e.g. Sev-1, Sev-2) it has these columns:
+    "<sev> Resolved", "<sev> Within SLA", "<sev> Resolved late", "<sev> Open breached", "<sev> SLA %"
+The project layout (project_html / project_png / project_summary_frame) shows
+SLA Met (= within SLA), SLA not Met (= resolved late + open breached), SLA Met %
+per severity and Overall SLA % per row.
 """
 
 import html
@@ -63,11 +64,6 @@ CSS = f"""
 METRIC_CLASS = {"Within SLA": "asg-good", "Breached SLA": "asg-bad"}
 
 
-def metrics_of(table=None):
-    """The metrics shown under each severity, in order."""
-    return ["Resolved", "Within SLA", "Breached SLA", "SLA %"]
-
-
 def metric_value(r, sev, metric):
     """One count for a team row and severity. Breached SLA = resolved late + open
     breached (open breached counts only when the table has that column)."""
@@ -97,11 +93,6 @@ def sla_cell(pct):
             f'border-color:{color}66;background:{color}1f;">{pct:.1f}%</span></span>')
 
 
-def overall_total(r):
-    """Total Resolved across all severities = Within SLA + Breached SLA for each severity."""
-    return sum(metric_value(r, sev, "Resolved") for sev in config.SLA_MINUTES)
-
-
 def overall_pct(r):
     """SLA % across all severities for one team row: within / (within + breached)."""
     within = sum(int(r[f"{sev} Within SLA"]) for sev in config.SLA_MINUTES)
@@ -115,42 +106,64 @@ def count_cell(v, cls=""):
     return '<span class="asg-zero">—</span>' if v == 0 else f'<span class="{cls}">{v:,}</span>'
 
 
-def sla_severity_html(table, wrap_breached=None):
-    """The per-team, per-severity SLA table as HTML (needs CSS above on the page).
-    wrap_breached(team, sev, count_html, count) may wrap a non-zero Breached SLA
-    count (e.g. in a ticket popup); its output replaces the count's HTML."""
+# Project layout (the SLA-by-severity summary): per severity SLA Met, SLA not Met and
+# SLA Met %, then one Overall SLA % per row. SLA not Met = resolved late + open breached.
+PROJECT_COLS = ["SLA Met", "SLA not Met", "SLA Met %"]
+
+
+def project_summary_frame(table):
+    """The project layout as a flat table for Excel: Project, then per severity
+    "<sev> SLA Met", "<sev> SLA not Met", "<sev> SLA Met %", then "Overall SLA %"."""
+    rows = []
+    for _, r in table.iterrows():
+        row = {"Project": r["Team"]}
+        for sev in config.SLA_MINUTES:
+            pct = r[f"{sev} SLA %"]
+            row[f"{sev} SLA Met"] = int(r[f"{sev} Within SLA"])
+            row[f"{sev} SLA not Met"] = metric_value(r, sev, "Breached SLA")
+            row[f"{sev} SLA Met %"] = None if pct is None or pd.isna(pct) else float(pct)
+        pct_all = overall_pct(r)
+        row["Overall SLA %"] = pct_all
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def project_html(table, wrap_breached=None):
+    """The project SLA table as HTML (needs CSS above on the page).
+    wrap_breached(team, sev, count_html, count) may wrap a non-zero SLA not Met
+    count (e.g. in a ticket popup); its output replaces the count's HTML. `team`
+    is the row's label (a project name, or Total)."""
     sevs = list(config.SLA_MINUTES.items())
-    metrics = metrics_of(table)
-    head = '<th>Team</th>' + "".join(
-        f'<th colspan="{len(metrics)}" style="text-align:center;">{sev} &middot; SLA {mins // 60} h</th>'
-        for sev, mins in sevs)
-    subhead = '<th></th>' + "".join(f'<th>{m}</th>' for _ in sevs for m in metrics) + '<th>Total Resolved</th><th>SLA %</th>'
-    head += '<th colspan="2" style="text-align:center;">Overall</th>'
+    head1 = '<th rowspan="2">Project</th>' + "".join(
+        f'<th colspan="{len(PROJECT_COLS)}" style="text-align:center;">{sev} &middot; SLA {mins // 60} h</th>'
+        for sev, mins in sevs) + '<th rowspan="2">Overall SLA %</th>'
+    head2 = "".join(f'<th>{m}</th>' for _ in sevs for m in PROJECT_COLS)
 
     def cell_html(r, sev, m):
-        if m == "SLA %":
+        if m == "SLA Met %":
             return sla_cell(r[f"{sev} SLA %"])
-        value = metric_value(r, sev, m)
-        inner = count_cell(value, METRIC_CLASS.get(m, ""))
-        if m == "Breached SLA" and wrap_breached and value:
+        if m == "SLA Met":
+            return count_cell(metric_value(r, sev, "Within SLA"), METRIC_CLASS["Within SLA"])
+        value = metric_value(r, sev, "Breached SLA")
+        inner = count_cell(value, METRIC_CLASS["Breached SLA"])
+        if wrap_breached and value:
             inner = wrap_breached(r["Team"], sev, inner, value)
         return inner
 
     body = []
     for _, r in table.iterrows():
-        is_all = r["Team"] == "All teams"
-        dot = "" if is_all else f'<span class="dot" style="background:{TEAM_COLOR.get(r["Team"], TEXT_MUTED)};"></span>'
-        cells = "".join(f'<td>{cell_html(r, sev, m)}</td>' for sev, _mins in sevs for m in metrics)
-        cells += f'<td>{count_cell(overall_total(r))}</td><td>{sla_cell(overall_pct(r))}</td>'
-        cls = ' class="asg-grand"' if is_all else ""
-        body.append(f'<tr{cls}><td><span class="asg-name">{dot}{html.escape(str(r["Team"]))}</span></td>{cells}</tr>')
+        is_total = r["Team"] == config.TOTAL_LABEL
+        cells = "".join(f'<td>{cell_html(r, sev, m)}</td>' for sev, _mins in sevs for m in PROJECT_COLS)
+        cells += f'<td>{sla_cell(overall_pct(r))}</td>'
+        cls = ' class="asg-grand"' if is_total else ""
+        body.append(f'<tr{cls}><td><span class="asg-name">{html.escape(str(r["Team"]))}</span></td>{cells}</tr>')
     wrap_cls = "asg-wrap asg-popups" if wrap_breached else "asg-wrap"
-    return (f'<div class="{wrap_cls}"><table class="asg-table"><thead><tr>{head}</tr><tr>{subhead}</tr></thead>'
+    return (f'<div class="{wrap_cls}"><table class="asg-table"><thead><tr>{head1}</tr><tr>{head2}</tr></thead>'
             f'<tbody>{"".join(body)}</tbody></table></div>')
 
 
-def severity_png(table, title, subtitle):
-    """The same table as a PNG (Pillow)."""
+def project_png(table, title, subtitle):
+    """The project SLA table as a PNG (Pillow), same layout as project_html."""
 
     def font(size, bold=False):
         try:
@@ -164,66 +177,56 @@ def severity_png(table, title, subtitle):
         d.text((x0 + (x1 - x0 - tw) / 2 - box[0], y0 + (y1 - y0 - th) / 2 - box[1]), text, font=f, fill=fill)
 
     sevs = list(config.SLA_MINUTES.items())
-    metrics = metrics_of(table)
-    pad, team_w, num_w = 24, 240, 118
-    head1_h, head2_h, row_h = 44, 36, 44
-    group_w = num_w * len(metrics)
-    width = pad * 2 + team_w + group_w * len(sevs) + num_w * 2
+    pad, name_w, num_w, overall_w = 24, 300, 130, 170
+    head1_h, head2_h, row_h = 44, 36, 48
+    group_w = num_w * len(PROJECT_COLS)
+    width = pad * 2 + name_w + group_w * len(sevs) + overall_w
     top = pad + 80
     height = top + head1_h + head2_h + row_h * len(table) + pad
     img = Image.new("RGB", (width, height), "#ffffff")
     d = ImageDraw.Draw(img)
     dark, grey, rule, band = "#20202c", "#5b5b66", "#d9d9e0", "#f4f4f8"
-    metric_color = {"Within SLA": COLOR_GOOD, "Breached SLA": COLOR_CRITICAL}
+    metric_color = {"SLA Met": COLOR_GOOD, "SLA not Met": COLOR_CRITICAL}
 
     d.text((pad, pad), title, font=font(26, True), fill=dark)
     d.text((pad, pad + 38), subtitle, font=font(15), fill=grey)
 
     d.rectangle([pad, top, width - pad, top + head1_h + head2_h], fill=dark)
-    center("Team", pad, top, pad + team_w, top + head1_h + head2_h, font(16, True), "#ffffff")
+    center("Project", pad, top, pad + name_w, top + head1_h + head2_h, font(16, True), "#ffffff")
     for i, (sev, mins) in enumerate(sevs):
-        x0 = pad + team_w + i * group_w
+        x0 = pad + name_w + i * group_w
         center(f"{sev}  ·  SLA {mins // 60} h", x0, top, x0 + group_w, top + head1_h, font(16, True), "#ffffff")
         d.line([x0, top, x0, top + head1_h + head2_h], fill="#55556a", width=2)
-        for j, lab in enumerate(metrics):
+        for j, lab in enumerate(PROJECT_COLS):
             cx = x0 + j * num_w
             center(lab, cx, top + head1_h, cx + num_w, top + head1_h + head2_h, font(14, True), "#c9c9d6")
 
-    x_overall = pad + team_w + len(sevs) * group_w
-    center("Overall", x_overall, top, x_overall + num_w * 2, top + head1_h, font(16, True), "#ffffff")
-    center("Total Resolved", x_overall, top + head1_h, x_overall + num_w, top + head1_h + head2_h, font(14, True), "#c9c9d6")
-    center("SLA %", x_overall + num_w, top + head1_h, x_overall + num_w * 2, top + head1_h + head2_h, font(14, True), "#c9c9d6")
+    x_overall = pad + name_w + len(sevs) * group_w
+    d.line([x_overall, top, x_overall, top + head1_h + head2_h], fill="#55556a", width=2)
+    center("Overall SLA %", x_overall, top, x_overall + overall_w, top + head1_h + head2_h, font(16, True), "#ffffff")
 
     y = top + head1_h + head2_h
     for _, r in table.iterrows():
-        is_all = r["Team"] == "All teams"
-        if is_all:
+        is_total = r["Team"] == config.TOTAL_LABEL
+        if is_total:
             d.rectangle([pad, y, width - pad, y + row_h], fill=band)
         d.line([pad, y + row_h, width - pad, y + row_h], fill=rule, width=1)
-        cy = y + row_h / 2
-        name_x = pad + 14
-        if not is_all:
-            d.ellipse([pad + 14, cy - 6, pad + 26, cy + 6], fill=TEAM_COLOR.get(r["Team"], grey))
-            name_x = pad + 34
-        center(str(r["Team"]), name_x, y, pad + team_w, y + row_h, font(16, True) if is_all else font(16), dark)
+        center(str(r["Team"]), pad + 14, y, pad + name_w, y + row_h, font(16, True) if is_total else font(16), dark)
         for i, (sev, _mins) in enumerate(sevs):
-            x0 = pad + team_w + i * group_w
-            for j, m in enumerate(metrics):
+            x0 = pad + name_w + i * group_w
+            for j, m in enumerate(PROJECT_COLS):
                 cx = x0 + j * num_w
-                if m == "SLA %":
+                if m == "SLA Met %":
                     pct = r[f"{sev} SLA %"]
                     has_pct = not (pct is None or pd.isna(pct))
                     center(f"{pct:.1f}%" if has_pct else "—", cx, y, cx + num_w, y + row_h, font(16, True),
                            pct_color(pct if has_pct else None))
                 else:
-                    v = metric_value(r, sev, m)
-                    center("—" if v == 0 else f"{v:,}", cx, y, cx + num_w, y + row_h, font(16, is_all),
-                           metric_color.get(m, dark))
+                    v = metric_value(r, sev, "Within SLA" if m == "SLA Met" else "Breached SLA")
+                    center("—" if v == 0 else f"{v:,}", cx, y, cx + num_w, y + row_h, font(16, is_total),
+                           metric_color[m])
         pct_all = overall_pct(r)
-        total_all = overall_total(r)
-        center("—" if total_all == 0 else f"{total_all:,}", x_overall, y, x_overall + num_w, y + row_h,
-               font(16, is_all), dark)
-        center(f"{pct_all:.1f}%" if pct_all is not None else "—", x_overall + num_w, y, x_overall + num_w * 2, y + row_h,
+        center(f"{pct_all:.1f}%" if pct_all is not None else "—", x_overall, y, x_overall + overall_w, y + row_h,
                font(16, True), pct_color(pct_all))
         y += row_h
 

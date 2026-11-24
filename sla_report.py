@@ -99,42 +99,68 @@ def fetch_open_breached_today():
                                        "Escalation Path"])
 
 
-def summary_rows(resolved, open_breached):
-    """One row per team and severity (plus All teams), each ticket counted once
-    in the All teams rows."""
+def project_frame(resolved, open_breached):
+    """The SLA-by-severity table in the project layout, with the same rows and rules
+    as the dashboard: one row per project (config.PROJECT_GROUPS) and one Total row,
+    each ticket counted once per row. Columns: "<sev> Within SLA", "<sev> Resolved late",
+    "<sev> Open breached", "<sev> SLA %". End-of-day reports pass no open tickets."""
     rows = []
-    for team in [*config.CATEGORIES, "All teams"]:
-        res = resolved.drop_duplicates("Key") if team == "All teams" else resolved[resolved["Team"] == team]
-        opn = open_breached.drop_duplicates("Key") if team == "All teams" else open_breached[open_breached["Team"] == team]
+    for label in [*config.PROJECT_GROUPS, config.TOTAL_LABEL]:
+        members = config.project_members(label)
+        res = resolved if members is None else resolved[resolved["Team"].isin(members)]
+        opn = open_breached if members is None else open_breached[open_breached["Team"].isin(members)]
+        res, opn = res.drop_duplicates("Key"), opn.drop_duplicates("Key")
+        row = {"Team": label}
         for sev in config.SLA_MINUTES:
             res_sev = res[res["Severity"] == sev]
             within = int((res_sev["Resolved Status"] == breach_logic.STATUS_OK).sum())
             late = int((res_sev["Resolved Status"] == breach_logic.STATUS_BREACHED).sum())
             open_n = int((opn["Severity"] == sev).sum())
             judged = within + late + open_n
-            rows.append({
-                "Team": team, "Sev": sev, "Resolved": within + late + open_n, "Within": within,
-                "Late": late, "Open": open_n,
-                "SLA": round(within / judged * 100, 1) if judged else None,
-            })
-    return rows
+            row.update({f"{sev} Within SLA": within, f"{sev} Resolved late": late,
+                        f"{sev} Open breached": open_n,
+                        f"{sev} SLA %": round(within / judged * 100, 1) if judged else None})
+        rows.append(row)
+    return pd.DataFrame(rows)
 
 
-def breached_count(r):
-    """Breached SLA = resolved late + open breached. End-of-day rows have no open count ("—")."""
-    return r["Late"] + (r["Open"] if isinstance(r["Open"], int) else 0)
+def _sla_headers():
+    """Column headings of the project table (Teams card, email, Excel)."""
+    heads = ["Project"]
+    for sev in config.SLA_MINUTES:
+        heads += [f"{sev} SLA Met", f"{sev} SLA not Met", f"{sev} SLA Met %"]
+    return heads + ["Overall SLA %"]
 
 
-def format_table(rows):
-    """Fixed-width table for a Teams code block."""
-    head = f"{'Team':<14}{'Sev':<7}{'Resolved':>15}{'Within SLA':>12}{'Breached SLA':>14}{'SLA %':>8}"
-    lines = [head, "-" * len(head)]
-    for i, r in enumerate(rows):
-        if r["Team"] == "All teams" and rows[i - 1]["Team"] != "All teams":
-            lines.append("-" * len(head))
-        pct = "—" if r["SLA"] is None else f"{r['SLA']:.1f}%"
-        lines.append(f"{r['Team']:<14}{r['Sev']:<7}{r['Resolved']:>15}{r['Within']:>12}"
-                     f"{breached_count(r):>14}{pct:>8}")
+def _sla_values(r):
+    """One project row as display values, in the order of _sla_headers().
+    SLA Met = within SLA; SLA not Met = resolved late + open breached."""
+    values = [r["Team"]]
+    met_all = not_met_all = 0
+    for sev in config.SLA_MINUTES:
+        pct = r[f"{sev} SLA %"]
+        met, not_met = int(r[f"{sev} Within SLA"]), int(r[f"{sev} Resolved late"]) + int(r[f"{sev} Open breached"])
+        met_all, not_met_all = met_all + met, not_met_all + not_met
+        values += [met, not_met, "—" if pct is None or pd.isna(pct) else f"{pct:.1f}%"]
+    judged = met_all + not_met_all
+    return values + [f"{met_all / judged * 100:.1f}%" if judged else "—"]
+
+
+def format_table(frame):
+    """Fixed-width project table for a Teams code block."""
+    sevs = list(config.SLA_MINUTES)
+    h1 = f"{'':<26}" + "".join(f"{sev:^26}" for sev in sevs) + f"{'Overall':>10}"
+    h2 = f"{'Project':<26}" + "".join(f"{'Met':>8}{'Not met':>10}{'Met %':>8}" for _ in sevs) + f"{'SLA %':>10}"
+    lines = [h1, h2, "-" * len(h2)]
+    for _, r in frame.iterrows():
+        if r["Team"] == config.TOTAL_LABEL:
+            lines.append("-" * len(h2))
+        vals = _sla_values(r)
+        text = f"{vals[0]:<26}"
+        for i in range(len(sevs)):
+            met, not_met, pct = vals[1 + 3 * i: 4 + 3 * i]
+            text += f"{met:>8}{not_met:>10}{pct:>8}"
+        lines.append(text + f"{vals[-1]:>10}")
     return "\n".join(lines)
 
 
@@ -142,16 +168,16 @@ def build_parts():
     """The report's pieces: title, as-of line, table and footnote."""
     now_pr = datetime.now(REPORT_TZ)
     jira_now = breach_logic.jira_now()
-    rows = summary_rows(fetch_resolved_today(), fetch_open_breached_today())
+    frame = project_frame(fetch_resolved_today(), fetch_open_breached_today())
     sev_text = ", ".join(f"{s} {m // 60} h" for s, m in config.SLA_MINUTES.items())
     return {
         "title": f"SLA by Severity — Today's Inflow — {jira_now:%d %b %Y}",
         "as_of": f"As of {now_pr:%H:%M} Puerto Rico time ({jira_now:%H:%M %Z} Jira time)",
-        "table": format_table(rows),
-        "rows": rows,
-        "footnote": (f"Within SLA = resolved before Created + the severity's SLA ({sev_text}). "
-                     "Breached SLA = resolved late + open tickets that breached their SLA today. "
-                     "SLA % = within ÷ (within + breached)."),
+        "table": format_table(frame),
+        "rows": frame,
+        "footnote": (f"SLA Met = resolved before Created + the severity's SLA ({sev_text}). "
+                     "SLA not Met = missed the SLA: resolved after it, or still open past it. "
+                     "SLA Met % = met ÷ (met + not met). Overall SLA % covers Sev-1 and Sev-2 together."),
     }
 
 
@@ -187,22 +213,21 @@ def workflow_payload(parts):
             text_block["color"] = color
         return {"type": "TableCell", "items": [text_block], "style": "emphasis" if emphasis else "default"}
 
-    header = ["Team", "Sev", "Resolved", "Within SLA", "Breached SLA", "SLA %"]
+    headers = _sla_headers()
     table_rows = [{"type": "TableRow", "style": "accent",
-                   "cells": [cell(v, i, bold=True) for i, v in enumerate(header)]}]
-    for r in parts["rows"]:
-        # Order Fallout only has Sev-2 tickets, so leave out its empty Sev-1 row.
-        if r["Team"] == "Order Fallout" and r["Sev"] == "Sev-1" and not (r["Resolved"] or r["Within"] or r["Late"]):
-            continue
-        is_all = r["Team"] == "All teams"
-        pct = "—" if r["SLA"] is None else f"{r['SLA']:.1f}%"
-        # Same thresholds as the dashboard: 90%+ green, 70-89% amber, below 70% red.
-        color = None
-        if r["SLA"] is not None:
-            color = "Good" if r["SLA"] >= 90 else "Warning" if r["SLA"] >= 70 else "Attention"
-        values = [r["Team"], r["Sev"], r["Resolved"], r["Within"], breached_count(r), pct]
-        cells = [cell(v, i, bold=is_all, emphasis=is_all, color=color if i == 5 else None)
-                 for i, v in enumerate(values)]
+                   "cells": [cell(v, i, bold=True) for i, v in enumerate(headers)]}]
+    pct_columns = {i for i, h in enumerate(headers) if h.endswith("%")}
+    for _, r in parts["rows"].iterrows():
+        is_total = r["Team"] == config.TOTAL_LABEL
+        values = _sla_values(r)
+        cells = []
+        for i, v in enumerate(values):
+            color = None
+            if i in pct_columns and v != "—":
+                # Same thresholds as the dashboard: 90%+ green, 70-89% amber, below 70% red.
+                pct = float(v.rstrip("%"))
+                color = "Good" if pct >= 90 else "Warning" if pct >= 70 else "Attention"
+            cells.append(cell(v, i, bold=is_total, emphasis=is_total, color=color))
         table_rows.append({"type": "TableRow", "cells": cells})
 
     table = {
@@ -211,9 +236,9 @@ def workflow_payload(parts):
         "showGridLines": True,
         "firstRowAsHeader": True,
         "verticalCellContentAlignment": "center",
-        # Widths are shares of the card width (wide enough that no label is cut off):
-        # Team 17, Sev 14, Total Resolved 16, Within SLA 15, Breached SLA 16, SLA % 14. Long text wraps.
-        "columns": [{"width": 17}, {"width": 14}, {"width": 16}, {"width": 15}, {"width": 16}, {"width": 14}],
+        # Shares of the card width: Project, then Met / Not met / Met % for Sev-1 and Sev-2, then Overall.
+        "columns": [{"width": 21}, {"width": 10}, {"width": 11}, {"width": 11},
+                    {"width": 10}, {"width": 11}, {"width": 11}, {"width": 12}],
         "rows": table_rows,
     }
     card_body = [
@@ -320,7 +345,7 @@ def fetch_resolved_on_day(day):
 
 def eod_ticket_sheet(resolved_day):
     """Every ticket resolved on the day, one row each, with Jira links."""
-    labels = {breach_logic.STATUS_OK: "Within SLA", breach_logic.STATUS_BREACHED: "Resolved late"}
+    labels = {breach_logic.STATUS_OK: "SLA Met", breach_logic.STATUS_BREACHED: "SLA not Met"}
 
     def stamp(value):
         return "" if value is None or pd.isna(value) else value.astimezone(breach_logic.JIRA_TZ).strftime("%Y-%m-%d %H:%M")
@@ -339,7 +364,7 @@ def eod_ticket_sheet(resolved_day):
         "Escalation Path": resolved_day["Escalation Path"].fillna("").values,
     })
     reasons = breach_reasons()
-    sheet["Breached Reason"] = [reasons.get(key, "") if sla == "Resolved late" else ""
+    sheet["Breached Reason"] = [reasons.get(key, "") if sla == "SLA not Met" else ""
                                 for key, sla in zip(sheet["Key"], sheet["SLA"])]
     sheet["Link"] = sheet["Key"].map(lambda key: f"{config.JIRA_BASE_URL.rstrip('/')}/browse/{key}")
     return sheet
@@ -356,17 +381,14 @@ def build_eod_report(day):
 
     resolved_day = fetch_resolved_on_day(day)
     empty_open = pd.DataFrame(columns=["Team", "Key", "Severity"])
-    rows = summary_rows(resolved_day, empty_open)  # resolved only: SLA % = within / (within + late)
-    for r in rows:
-        r["Open"] = "—"
+    frame = project_frame(resolved_day, empty_open)  # resolved only: no open tickets
     sheet = eod_ticket_sheet(resolved_day)
-    summary = pd.DataFrame(rows)
     os.makedirs(REPORTS_DIR, exist_ok=True)
     path = os.path.join(REPORTS_DIR, f"EOD_SLA_Report_{day:%Y-%m-%d}.xlsx")
     with open(path, "wb") as f:
         same_day = sheet["Created & Resolved Same Day"] == "Yes"
         f.write(ui_common.write_excel({
-            "Summary": summary,
+            "Summary": _summary_sheet(frame),
             "Resolved from Today's Inflow": sheet[same_day],
             "Resolved from Past Inflow": sheet[~same_day],
         }))
@@ -374,8 +396,8 @@ def build_eod_report(day):
         "title": f"End of day SLA report — {day:%d %b %Y}",
         "as_of": (f"Tickets resolved {day:%d %b %Y} 00:00:00 to 23:59:59 Jira time ({breach_logic.JIRA_TZ}) · "
                   f"{len(resolved_day)} resolved tickets"),
-        "rows": rows,
-        "footnote": f"Full ticket list ({len(sheet)} tickets, with Jira links) saved to: {path}",
+        "rows": frame,
+        "footnote": f"Full ticket list ({len(sheet)} tickets, with Jira links) is in the Excel file {os.path.basename(path)}.",
         "path": path,
     }
 
@@ -395,22 +417,16 @@ def email_subject(day, suffix=""):
     return text + (f" - {suffix}" if suffix else "")
 
 
-def wide_table(rows):
-    """Summary rows (one per team and severity) -> one row per team with a column group per
-    severity, the layout of the SLA summary picture."""
-    by_team = {}
-    for r in rows:
-        w = by_team.setdefault(r["Team"], {"Team": r["Team"]})
-        sev = r["Sev"]
-        open_n = r["Open"] if isinstance(r["Open"], int) else 0
-        w.update({f"{sev} Resolved": r["Resolved"], f"{sev} Within SLA": r["Within"],
-                  f"{sev} Resolved late": r["Late"], f"{sev} Open breached": open_n, f"{sev} SLA %": r["SLA"]})
-    return pd.DataFrame(list(by_team.values()))
+def _summary_sheet(frame):
+    """The project table as the Excel Summary sheet (the same layout as the PNG)."""
+    import sla_views
+    return sla_views.project_summary_frame(frame)
 
 
-def png_summary(rows, title, subtitle):
-    import sla_views  # draws the same table as the dashboard's PNG download
-    return sla_views.severity_png(wide_table(rows), title, subtitle)
+def png_summary(frame, title, subtitle):
+    """The project table as a PNG, the same picture as the dashboard's download."""
+    import sla_views  # imports Streamlit helpers, so loaded only when a picture is drawn
+    return sla_views.project_png(frame, title, subtitle)
 
 
 def today_excel(rows, open_breached, day):
@@ -424,9 +440,9 @@ def today_excel(rows, open_breached, day):
     open_sheet["Breached Reason"] = open_sheet["Key"].map(lambda key: reasons.get(key, ""))
     open_sheet["Link"] = open_sheet["Key"].map(lambda key: f"{config.JIRA_BASE_URL.rstrip('/')}/browse/{key}")
     return ui_common.write_excel({
-        "Summary": pd.DataFrame(rows),
+        "Summary": _summary_sheet(rows),
         "Resolved Today (Inflow)": inflow,
-        "Open Breached": open_sheet,
+        "Open SLA not Met": open_sheet,
     })
 
 
@@ -466,13 +482,12 @@ def _send_hourly_email(to=None):
     jira_now = breach_logic.jira_now()
     today = jira_now.date()
     opn = fetch_open_breached_today()
-    rows = summary_rows(fetch_resolved_today(), opn)
+    rows = project_frame(fetch_resolved_today(), opn)
     title = f"SLA by Severity — Today's Inflow — {jira_now:%d %b %Y}"
     as_of = f"As of {now_pr:%H:%M} Puerto Rico time ({jira_now:%H:%M %Z} Jira time)"
     png = png_summary(rows, title, as_of)
     xlsx = today_excel(rows, opn, today)
-    body = (f"<p><b>{html.escape(title)}</b><br>{html.escape(as_of)}</p>{_picture_html(png)}"
-            "<p>The full ticket list is in the attached Excel file.</p>")
+    body = email_body(title, as_of, rows, png)
     smtp_mail.send(email_subject(today, f"as of {now_pr:%H:%M} PR time"), body,
                    to or smtp_mail.live_recipients(), png=png,
                    attachment=(f"SLA_Today_Inflow_{today:%Y-%m-%d}_{now_pr:%H%M}.xlsx", xlsx))
@@ -496,8 +511,7 @@ def _send_eod_email(day, parts, to=None):
         xlsx = f.read()
     title = f"SLA by Severity — Resolved on {day:%d %b %Y}"
     png = png_summary(parts["rows"], title, parts["as_of"])
-    body = (f"<p><b>{html.escape(title)}</b><br>{html.escape(parts['as_of'])}</p>{_picture_html(png)}"
-            "<p>The full ticket list is in the attached Excel file.</p>")
+    body = email_body(title, parts["as_of"], parts["rows"], png)
     smtp_mail.send(email_subject(day), body, to or smtp_mail.live_recipients(), png=png,
                    attachment=(os.path.basename(parts["path"]), xlsx))
 
@@ -513,21 +527,18 @@ def send_test_email():
     send_hourly_email(to=smtp_mail.test_recipients())
 
 
-def email_html(parts):
-    """The summary table as an HTML email body (no local file paths)."""
+def email_body(title, as_of, frame, png):
+    """Email body: title, as-of line, the picture, the same table as HTML, and a note
+    about the Excel attachment (no local file paths)."""
     cell_style = "padding:4px 8px;border:1px solid #cccccc;"
     head = "".join(f"<th style='{cell_style}background:#20202c;color:#ffffff;'>{h}</th>"
-                   for h in ["Team", "Sev", "Resolved", "Within SLA", "Breached SLA", "SLA %"])
+                   for h in _sla_headers())
     body_rows = []
-    for r in parts["rows"]:
-        if r["Team"] == "Order Fallout" and r["Sev"] == "Sev-1" and not (r["Resolved"] or r["Within"] or r["Late"]):
-            continue
-        pct = "—" if r["SLA"] is None else f"{r['SLA']:.1f}%"
-        bold = "font-weight:bold;" if r["Team"] == "All teams" else ""
-        values = [r["Team"], r["Sev"], r["Resolved"], r["Within"], breached_count(r), pct]
+    for _, r in frame.iterrows():
+        bold = "font-weight:bold;" if r["Team"] == config.TOTAL_LABEL else ""
         body_rows.append("<tr>" + "".join(f"<td style='{cell_style}{bold}'>{html.escape(str(v))}</td>"
-                                          for v in values) + "</tr>")
-    return (f"<p><b>{html.escape(parts['title'])}</b><br>{html.escape(parts['as_of'])}</p>"
+                                          for v in _sla_values(r)) + "</tr>")
+    return (f"<p><b>{html.escape(title)}</b><br>{html.escape(as_of)}</p>{_picture_html(png)}"
             f"<table style='border-collapse:collapse;font-family:Arial;font-size:13px;'>"
             f"<tr>{head}</tr>{''.join(body_rows)}</table>"
             "<p>The full ticket list is in the attached Excel file.</p>")

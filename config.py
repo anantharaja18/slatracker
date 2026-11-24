@@ -98,6 +98,27 @@ SEVERITY_FIELD = "customfield_10051"  # "Severity" custom field -- values are "S
 # Sev-1 = 1 hour, Sev-2 = 4 hours. Jira's own SLA timers are not used.
 SLA_MINUTES = {"Sev-1": 60, "Sev-2": 240}
 
+# SLA-by-severity summary rows: several teams are combined into one project row.
+# Order Fallout stays on its own row. TOTAL_LABEL is every team, each ticket once.
+PROJECT_GROUPS = {
+    "SAC (SAC, B2B & Retail)": ["SAC", "B2B", "Retail"],
+    "Order Fallout": ["Order Fallout"],
+}
+TOTAL_LABEL = "Total"
+
+
+def project_members(label):
+    """Team categories behind one summary row (None for the Total row)."""
+    return None if label == TOTAL_LABEL else PROJECT_GROUPS[label]
+
+
+def project_of(category):
+    """The summary row a team category belongs to."""
+    for label, members in PROJECT_GROUPS.items():
+        if category in members:
+            return label
+    return category
+
 # B2B tickets are counted only under B2B: Retail and SAC exclude them (keeping
 # tickets with no Account type) so no ticket shows up under two teams.
 CATEGORIES = {

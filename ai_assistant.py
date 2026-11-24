@@ -74,7 +74,7 @@ TOOLS = [
                 },
                 "resolved_status": {
                     "type": "string",
-                    "enum": ["Within SLA", "Breached", "Any"],
+                    "enum": ["SLA Met", "SLA not Met", "Any"],
                     "description": "Filter by whether resolution beat the SLA deadline. Use 'Any' for no filter.",
                 },
             },
@@ -141,7 +141,7 @@ def list_open_tickets(category, breach_status, category_data):
 
 
 def list_resolved_tickets(category, resolved_status, resolved_data):
-    status_map = {"Within SLA": breach_logic.STATUS_OK, "Breached": breach_logic.STATUS_BREACHED}
+    status_map = {"SLA Met": breach_logic.STATUS_OK, "SLA not Met": breach_logic.STATUS_BREACHED}
     filter_status = status_map.get(resolved_status)
 
     categories = _resolve_categories(category, resolved_data.keys())

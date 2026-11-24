@@ -19,7 +19,7 @@ import trend_analysis as ta
 import trend_store
 
 TEAMS = list(config.CATEGORIES)
-WITHIN, LATE, NOT_JUDGED = "Within SLA", "Resolved late", "No SLA (severity not set)"
+WITHIN, LATE, NOT_JUDGED = "SLA Met", "SLA not Met", "No SLA (severity not set)"
 SLA_LABEL = {breach_logic.STATUS_OK: WITHIN, breach_logic.STATUS_BREACHED: LATE,
              breach_logic.STATUS_UNKNOWN: NOT_JUDGED}
 
@@ -146,10 +146,12 @@ def sla_by_created(df, open_rows, start, end):
     res = df[(df["created"].str[:10] >= lo) & (df["created"].str[:10] <= hi)]
     opn = open_rows[(open_rows["created"] >= lo) & (open_rows["created"] <= hi) & open_rows["breached"]]
     rows = []
-    for team in [*TEAMS, "All teams"]:
-        r_part = res.drop_duplicates("key") if team == "All teams" else res[res["category"] == team]
-        o_part = opn.drop_duplicates("key") if team == "All teams" else opn[opn["category"] == team]
-        row = {"Team": team}
+    for label in [*config.PROJECT_GROUPS, config.TOTAL_LABEL]:
+        members = config.project_members(label)
+        r_part = res if members is None else res[res["category"].isin(members)]
+        o_part = opn if members is None else opn[opn["category"].isin(members)]
+        r_part, o_part = r_part.drop_duplicates("key"), o_part.drop_duplicates("key")
+        row = {"Team": label}
         for sev in config.SLA_MINUTES:
             rs = r_part[r_part["severity"] == sev]
             within = int((rs["sla"] == WITHIN).sum())
@@ -199,10 +201,10 @@ def breached_tickets(df, open_rows, start, end, team, sev):
              & (df["sla"] == LATE) & (df["severity"] == sev)]
     opn = open_rows[(open_rows["created"] >= lo) & (open_rows["created"] <= hi)
                     & open_rows["breached"] & (open_rows["severity"] == sev)]
-    if team == "All teams":
-        res, opn = res.drop_duplicates("key"), opn.drop_duplicates("key")
-    else:
-        res, opn = res[res["category"] == team], opn[opn["category"] == team]
+    members = config.project_members(team)
+    if members is not None:
+        res, opn = res[res["category"].isin(members)], opn[opn["category"].isin(members)]
+    res, opn = res.drop_duplicates("key"), opn.drop_duplicates("key")
     out = []
     for part in (res, opn):
         for _, row in part.iterrows():
@@ -262,14 +264,14 @@ def by_assignee(df, start, end, teams, assignees=None):
         "Total Resolved": counts.sum(axis=1),
         INFLOW_SAME_DAY: same_day,
         INFLOW_PAST: counts.sum(axis=1) - same_day,
-        "Within SLA": within.reindex(counts.index, fill_value=0),
-        "Resolved late": late.reindex(counts.index, fill_value=0),
+        "SLA Met": within.reindex(counts.index, fill_value=0),
+        "SLA not Met": late.reindex(counts.index, fill_value=0),
     })
-    table["SLA %"] = [sla_pct(w, l) for w, l in zip(table["Within SLA"], table["Resolved late"])]
+    table["SLA %"] = [sla_pct(w, l) for w, l in zip(table["SLA Met"], table["SLA not Met"])]
     table = table.sort_values("Total Resolved", ascending=False).reset_index().rename(columns={"assignee": "Assignee"})
     total = table.drop(columns=["Assignee", "SLA %"]).sum()
     total_row = {"Assignee": "Grand Total", **total.to_dict(),
-                 "SLA %": sla_pct(total["Within SLA"], total["Resolved late"])}
+                 "SLA %": sla_pct(total["SLA Met"], total["SLA not Met"])}
     return pd.concat([table, pd.DataFrame([total_row])], ignore_index=True)
 
 

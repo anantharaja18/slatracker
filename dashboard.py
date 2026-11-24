@@ -698,13 +698,14 @@ def resolved_sla_frame(resolved_data, resolved_errors, open_buckets):
         "assignee": "Assignee", "due": "Due", "escalation": "Escalation", "created": "Created"})
 
     rows = []
-    for team in [*config.CATEGORIES, "All teams"]:
-        if team == "All teams":
-            res_part, open_part = resolved_all.drop_duplicates("Key"), open_all.drop_duplicates("Key")
-        else:
-            res_part = resolved_all[resolved_all["Team"] == team]
-            open_part = open_all[open_all["Team"] == team]
-        row = {"Team": team}
+    for label in [*config.PROJECT_GROUPS, config.TOTAL_LABEL]:
+        members = config.project_members(label)
+        res_part, open_part = resolved_all, open_all
+        if members is not None:
+            res_part = resolved_all[resolved_all["Team"].isin(members)]
+            open_part = open_all[open_all["Team"].isin(members)]
+        res_part, open_part = res_part.drop_duplicates("Key"), open_part.drop_duplicates("Key")
+        row = {"Team": label}
         for sev in config.SLA_MINUTES:
             res_sev = res_part[res_part["Severity"] == sev]
             open_sev = open_part[open_part["Severity"] == sev]
@@ -724,12 +725,13 @@ def resolved_sla_frame(resolved_data, resolved_errors, open_buckets):
 def resolved_ticket_sheet(resolved_all, open_all):
     """Every ticket behind the severity summary (resolved today, then open
     breached today), with Jira links."""
-    labels = {breach_logic.STATUS_OK: "Within SLA", breach_logic.STATUS_BREACHED: "Resolved late"}
+    labels = {breach_logic.STATUS_OK: "SLA Met", breach_logic.STATUS_BREACHED: "SLA not Met"}
 
     def due_text(value):
         return "" if value is None or pd.isna(value) else value.strftime("%Y-%m-%d %H:%M")
 
     resolved = pd.DataFrame({
+        "Project": resolved_all["Team"].map(config.project_of).values,
         "Team": resolved_all["Team"].values,
         "Key": resolved_all["Key"].values,
         "Summary": resolved_all["Summary"].values,
@@ -742,20 +744,21 @@ def resolved_ticket_sheet(resolved_all, open_all):
         "Escalation Path": resolved_all["Escalation Path"].fillna("").values,
     })
     still_open = pd.DataFrame({
+        "Project": open_all["Team"].map(config.project_of).values,
         "Team": open_all["Team"].values,
         "Key": open_all["Key"].values,
         "Summary": open_all["Summary"].values,
         "Severity": open_all["Severity"].values,
         "Status": open_all["Status"].values,
         "Assignee": open_all["Assignee"].values,
-        "SLA": ["Open, breached"] * len(open_all),
+        "SLA": ["SLA not Met"] * len(open_all),
         "SLA Due": open_all["Due"].values,
         "Created": open_all["Created"].values,
         "Escalation Path": open_all["Escalation"].fillna("").values,
     })
     sheet = pd.concat([resolved, still_open], ignore_index=True)
     reasons = {key: note["comment"] for key, note in sla_comments.load_all().items() if note["comment"]}
-    sheet["Breached Reason"] = [reasons.get(key, "") if sla in ("Resolved late", "Open, breached") else ""
+    sheet["Breached Reason"] = [reasons.get(key, "") if sla == "SLA not Met" else ""
                                 for key, sla in zip(sheet["Key"], sheet["SLA"])]
     sheet["Link"] = sheet["Key"].map(ui_common.jira_url)
     return sheet
@@ -932,7 +935,7 @@ with header_col2:
         f'<div class="overall-stat-value">{resolved_today_inflow_count}</div>'
         '<div class="overall-stat-label">Resolved from Today Inflow</div></div>'
         '<div class="overall-divider"></div>'
-        '<div class="overall-stat" title="Within SLA / (Within SLA + Resolved late + Open, breached today)">'
+        '<div class="overall-stat" title="SLA Met / (SLA Met + SLA not Met)">'
         f'<div class="overall-stat-value" style="color:{sla_pct_color(today_pct)};">{today_pct_display}</div>'
         '<div class="overall-stat-label">Today SLA</div></div>'
         '</div>',
@@ -1043,23 +1046,23 @@ with resolved_section:
             + mini_stat(pct_display, "Today SLA", sla_pct_color(pct))
             + '</div>'
             + popup_row(
-                f'<span class="label"><span class="dot" style="background:{COLOR_GOOD};"></span>Within SLA</span>'
+                f'<span class="label"><span class="dot" style="background:{COLOR_GOOD};"></span>SLA Met</span>'
                 f'<span class="value">{counts["within_sla"]}</span>',
                 bucket_popup_html(resolved_tickets_by_status(today_df, breach_logic.STATUS_OK)),
-                f"{category} — Within SLA (today's inflow)",
+                f"{category} — SLA Met (today's inflow)",
             )
             + popup_row(
-                f'<span class="label"><span class="dot" style="background:{COLOR_CRITICAL};"></span>Resolved late</span>'
+                f'<span class="label"><span class="dot" style="background:{COLOR_CRITICAL};"></span>SLA not Met</span>'
                 f'<span class="value">{counts["breached"]}</span>',
                 bucket_popup_html(resolved_tickets_by_status(today_df, breach_logic.STATUS_BREACHED)),
-                f"{category} — Resolved late (today's inflow)",
+                f"{category} — SLA not Met on resolved (today's inflow)",
                 export_group=RESOLVED_BREACHED_GROUP,
             )
             + popup_row(
                 f'<span class="label"><span class="dot" style="background:{BUCKET_COLOR[BUCKET_BREACHED_TODAY]};"></span>Open, breached</span>'
                 f'<span class="value">{breached_open["count"]}</span>',
                 bucket_popup_html(breached_open["tickets"]),
-                f"{category} — Open, breached today",
+                f"{category} — SLA not Met, still open today",
                 export_group=RESOLVED_BREACHED_GROUP,
             )
             + '<div class="bucket-subcaption">Also resolved today</div>'
@@ -1089,18 +1092,18 @@ with st.container(border=True):
         st.download_button(
             "⬇️ Download SLA by severity (Excel)",
             data=lambda s=sev_summary, r=sev_resolved, o=sev_open: ui_common.write_excel({
-                "Summary": s,
+                "Summary": sla_views.project_summary_frame(s),
                 "Ticket Details": resolved_ticket_sheet(r, o),
             }),
             on_click="ignore", key="dash_sev_xlsx",
             file_name=f"Resolved_SLA_By_Severity_{breach_logic.jira_now():%Y-%m-%d}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            help="Summary sheet (this table) and Ticket Details sheet (resolved-today and open breached tickets, with Jira links).",
+            help="Summary sheet (this table) and Ticket Details sheet (every resolved-today and open breached ticket, with Project, Team and Jira links).",
         )
     with sev_png:
         st.download_button(
             "🖼️ Download SLA summary (PNG)",
-            data=lambda s=sev_summary: sla_views.severity_png(
+            data=lambda s=sev_summary: sla_views.project_png(
                 s, f"SLA by Severity — Today's Inflow — {breach_logic.jira_now():%d %b %Y}",
                 f"All dates and times in {breach_logic.jira_time_label()}"),
             on_click="ignore", key="dash_sev_png",
@@ -1108,15 +1111,15 @@ with st.container(border=True):
             mime="image/png", help="The Summary table as an image.",
         )
     def breached_sev_popup(team, sev, count_html, count):
-        """Hover popup on a Breached SLA count: the tickets behind it (resolved late today
+        """Hover popup on a SLA not Met count: the tickets behind it (resolved late today
         plus open breached today) with key, severity, assignee and status."""
         res = sev_resolved[(sev_resolved["Severity"] == sev)
                            & (sev_resolved["Resolved Status"] == breach_logic.STATUS_BREACHED)]
         opn = sev_open[sev_open["Severity"] == sev]
-        if team != "All teams":
-            res, opn = res[res["Team"] == team], opn[opn["Team"] == team]
-        else:
-            res, opn = res.drop_duplicates("Key"), opn.drop_duplicates("Key")
+        members = config.project_members(team)
+        if members is not None:
+            res, opn = res[res["Team"].isin(members)], opn[opn["Team"].isin(members)]
+        res, opn = res.drop_duplicates("Key"), opn.drop_duplicates("Key")
         tickets = []
         for _, row in pd.concat([res, opn], ignore_index=True).iterrows():
             tickets.append({"key": row["Key"], "assignee": row["Assignee"] or "Unassigned",
@@ -1124,12 +1127,13 @@ with st.container(border=True):
                             "summary": row["Summary"] or "", "due": "",
                             "escalation": row["Escalation"] if isinstance(row.get("Escalation"), str) else ""})
         return popup_row(count_html, bucket_popup_html(tickets),
-                         f"{team} — {sev} Breached SLA today ({count})", row_class="asg-popup-cell")
+                         f"{team} — {sev} SLA not Met today ({count})", row_class="asg-popup-cell")
 
-    st.markdown(sla_views.sla_severity_html(sev_summary, wrap_breached=breached_sev_popup), unsafe_allow_html=True)
-    st.caption(f"Within SLA = resolved before Created + the severity's SLA "
+    st.markdown(sla_views.project_html(sev_summary, wrap_breached=breached_sev_popup), unsafe_allow_html=True)
+    st.caption(f"SLA Met = resolved before Created + the severity's SLA "
                f"({', '.join(f'{s} {m // 60} h' for s, m in config.SLA_MINUTES.items())}). "
-               "SLA % = within ÷ (within + resolved late + open breached), the same rule as Today SLA.")
+               "SLA not Met = missed the SLA: resolved after it, or still open past it. SLA Met % = met ÷ (met + not met); "
+               "Overall SLA % covers Sev-1 and Sev-2 together.")
 
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------

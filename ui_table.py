@@ -47,9 +47,9 @@ SEVERITY_TAG_COLORS = {  # (background, text)
 
 # SLA / breach outcome -> color (dashboard breach statuses and resolved SLA).
 SLA_COLOR = {
-    "ok": COLOR_GOOD, "within sla": COLOR_GOOD,
+    "ok": COLOR_GOOD, "within sla": COLOR_GOOD, "sla met": COLOR_GOOD,
     "about to breach": COLOR_WARNING,
-    "breached": COLOR_CRITICAL, "resolved late": COLOR_CRITICAL,
+    "breached": COLOR_CRITICAL, "resolved late": COLOR_CRITICAL, "sla not met": COLOR_CRITICAL,
 }
 
 # Column name -> cell style, when not given explicitly.
