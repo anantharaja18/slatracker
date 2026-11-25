@@ -265,6 +265,13 @@ def workflow_payload(parts):
     }
 
 
+def teams_message(parts):
+    """The live Teams post: title, as-of line and the HTML table, as a chat message (the flow posts `text`)."""
+    return {"type": "message",
+            "text": (f"<b>{html.escape(parts['title'])}</b><br>{html.escape(parts['as_of'])}<br>"
+                     f"{html_table(parts)}{html.escape(parts['footnote'])}")}
+
+
 def post_report(dry_run=False):
     """Build the report and post it to the saved Workflow link. Returns True if posted."""
     if dry_run:
@@ -279,7 +286,7 @@ def post_report(dry_run=False):
         url = report_settings.webhook_url()
         if not url:
             raise RuntimeError("No Teams workflow link is saved yet")
-        resp = requests.post(url, json=workflow_payload(parts), timeout=30)
+        resp = requests.post(url, json=teams_message(parts), timeout=30)
         if resp.status_code >= 300:
             raise RuntimeError(f"Teams replied HTTP {resp.status_code}: {resp.text[:300]}")
     except Exception as exc:
@@ -623,7 +630,7 @@ def post_eod_report(day=None):
         url = report_settings.webhook_url()
         if not url:
             raise RuntimeError("No Teams workflow link is saved yet")
-        resp = requests.post(url, json=workflow_payload(parts), timeout=60)
+        resp = requests.post(url, json=teams_message(parts), timeout=60)
         if resp.status_code >= 300:
             raise RuntimeError(f"Teams replied HTTP {resp.status_code}: {resp.text[:300]}")
     except Exception as exc:
