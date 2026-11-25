@@ -1544,6 +1544,21 @@ with st.expander("Report Settings (Admin)"):
                 st.success("Report sent to Prodapt Incident Managers")
             except Exception as exc:
                 st.error(f"Not sent: {exc}")
+        st.markdown("**Teams test** (posts one card to a test link only; the saved link and the schedule are not used)")
+        test_link = st.text_input("Test webhook link (not saved)", type="password", key="report_test_link")
+        test_hourly_col, test_daily_col = st.columns(2)
+        if test_hourly_col.button("Send test hourly Teams report", key="report_test_hourly"):
+            try:
+                sla_report.post_test_card("hourly", test_link.strip())
+                st.success("Test hourly card posted to the test link")
+            except Exception as exc:
+                st.error(f"Test hourly card not sent: {exc}")
+        if test_daily_col.button("Send test daily Teams report", key="report_test_daily"):
+            try:
+                sla_report.post_test_card("daily", test_link.strip())
+                st.success("Test daily card posted to the test link")
+            except Exception as exc:
+                st.error(f"Test daily card not sent: {exc}")
         st.divider()
         st.caption("Save all settings writes every setting on this panel in one go: the link (if pasted), "
                    "the frequencies, all four switches and the recipient list.")

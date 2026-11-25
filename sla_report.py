@@ -239,8 +239,8 @@ def workflow_payload(parts):
         "firstRowAsHeader": True,
         "verticalCellContentAlignment": "center",
         # Shares of the card width: Project, then Met / Not met / Met % for Sev-1 and Sev-2, then Overall.
-        "columns": [{"width": 60}, {"width": 80}, {"width": 80}, {"width": 80},
-                    {"width": 80}, {"width": 80}, {"width": 80}, {"width": 80}],
+        "columns": [{"width": 600}, {"width": 600}, {"width": 600}, {"width": 600},
+                    {"width": 600}, {"width": 600}, {"width": 600}, {"width": 600}],
         "rows": table_rows,
     }
     card_body = [
@@ -540,6 +540,80 @@ def email_body(title, as_of, frame, png):
     second copy), and a note about the Excel attachment (no local file paths)."""
     return (f"<p><b>{html.escape(title)}</b><br>{html.escape(as_of)}</p>{_picture_html(png)}"
             "<p>The full ticket list is in the attached Excel file.</p>")
+
+
+TEXT_HEADERS = ["Project", "S1 Met", "S1 Not", "S1 %", "S2 Met", "S2 Not", "S2 %", "Overall %"]
+
+
+def text_table(parts):
+    """The report as a fixed-width text table (one line per row), for a code block in a chat message."""
+    rows = [TEXT_HEADERS] + [[str(v) for v in _sla_values(r)] for _, r in parts["rows"].iterrows()]
+    widths = [max(len(row[i]) for row in rows) for i in range(len(TEXT_HEADERS))]
+    lines = []
+    for row in rows:
+        cells = [v.ljust(w) if i == 0 else v.rjust(w) for i, (v, w) in enumerate(zip(row, widths))]
+        lines.append("  ".join(cells).rstrip())
+    return "\n".join(lines)
+
+
+def html_table(parts):
+    """The report as an HTML <table> for a chat message."""
+    head = "".join(f'<th style="white-space:nowrap">{html.escape(h)}</th>' for h in _sla_headers())
+    headers = _sla_headers()
+    pct_columns = {i for i, h in enumerate(headers) if h.endswith("%")}
+
+    def cell_html(i, v):
+        css = ["white-space:nowrap"]
+        if i in pct_columns and v != "—":
+            # Same thresholds as the dashboard: 90%+ green, 70-89% amber, below 70% red.
+            pct = float(v.rstrip("%"))
+            colour = "#4caf50" if pct >= 90 else "#ffb300" if pct >= 70 else "#e53935"
+            css += [f"color:{colour}", "font-weight:bold"]
+        align = "left" if i == 0 else "right"
+        return f'<td align="{align}" style="{";".join(css)}">{html.escape(str(v))}</td>'
+
+    body = "".join("<tr>" + "".join(cell_html(i, v) for i, v in enumerate(_sla_values(r))) + "</tr>"
+                   for _, r in parts["rows"].iterrows())
+    return f'<table border="1" cellpadding="4"><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>'
+
+
+def post_test_text(kind, url, as_table=False):
+    """Posts the report as a chat message to `url` (HTML: a code block, or a table if as_table). Test use only."""
+    label = f"Teams test {'table' if as_table else 'text'} ({kind})"
+    try:
+        if not url:
+            raise RuntimeError("Paste a test webhook link first")
+        parts = build_parts() if kind == "hourly" else build_eod_report(previous_day())
+        # The flow posts the text as HTML, so Markdown is not rendered: use HTML tags for bold, line breaks and the table.
+        grid = html_table(parts) if as_table else f"<pre>{html.escape(text_table(parts))}</pre>"
+        message = (f"<b>{html.escape(parts['title'])}</b><br>{html.escape(parts['as_of'])}<br>"
+                   f"{grid}{html.escape(parts['footnote'])}")
+        resp = requests.post(url, json={"type": "message", "text": message}, timeout=60)
+        if resp.status_code >= 300:
+            raise RuntimeError(f"Teams replied HTTP {resp.status_code}: {resp.text[:300]}")
+    except Exception as exc:
+        report_log.record(label, False, exc)
+        raise
+    report_log.record(label, True, f"HTTP {resp.status_code}")
+    return True
+
+
+def post_test_card(kind, url):
+    """Posts one Teams card ("hourly" = today so far, "daily" = previous full day) to `url`,
+    a test link typed in the admin panel. Nothing else runs: no email, and the saved link is not used."""
+    label = f"Teams test ({kind})"
+    try:
+        if not url:
+            raise RuntimeError("Paste a test webhook link first")
+        parts = build_parts() if kind == "hourly" else build_eod_report(previous_day())
+        resp = requests.post(url, json=workflow_payload(parts), timeout=60)
+        if resp.status_code >= 300:
+            raise RuntimeError(f"Teams replied HTTP {resp.status_code}: {resp.text[:300]}")
+    except Exception as exc:
+        report_log.record(label, False, exc)
+        raise
+    report_log.record(label, True, f"HTTP {resp.status_code}")
+    return True
 
 
 def post_eod_report(day=None):
