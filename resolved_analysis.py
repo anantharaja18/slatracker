@@ -179,7 +179,7 @@ def _created_counts(df, open_rows, start, end, team):
     open_n = len(opn)
     breached = late + open_n
     return {"resolved": len(res), "within": within, "late": late, "open_breached": open_n,
-            "breached": breached, "pct": sla_pct(within, breached)}
+            "breached": breached, "judged": within + breached, "pct": sla_pct(within, breached)}
 
 
 def created_summary(df, open_rows, start, end, prev_range):
@@ -275,8 +275,14 @@ def by_assignee(df, start, end, teams, assignees=None):
     return pd.concat([table, pd.DataFrame([total_row])], ignore_index=True)
 
 
-def ticket_list(df, start, end):
-    part = in_period(df, start, end).sort_values("resolved", ascending=False)
+def ticket_list(df, start, end, by="resolved"):
+    """Ticket rows for the period: resolved in [start, end] (by="resolved"), or created in it (by="created")."""
+    if by == "created":
+        lo, hi = f"{start:%Y-%m-%d}", f"{end:%Y-%m-%d}"
+        part = df[(df["created"].str[:10] >= lo) & (df["created"].str[:10] <= hi)]
+    else:
+        part = in_period(df, start, end)
+    part = part.sort_values("resolved", ascending=False)
     return pd.DataFrame({
         "S.No": range(1, len(part) + 1),
         "Key": part["key"].values,

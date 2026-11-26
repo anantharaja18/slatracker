@@ -119,6 +119,10 @@ def project_of(category):
             return label
     return category
 
+# SAC tickets whose Reporting Area is "Monitoring team" are left out of every SAC query
+# (counts, SLA, Excel and the Teams report).
+SAC_NOT_MONITORING = '"Reporting Area[Dropdown]" != "Monitoring team"'
+
 # B2B tickets are counted only under B2B: Retail and SAC exclude them (keeping
 # tickets with no Account type) so no ticket shows up under two teams.
 CATEGORIES = {
@@ -150,18 +154,21 @@ CATEGORIES = {
             'project = SAC AND created >= startofday() AND "Reporting Area" != Retail '
             'AND reporter != "SAC BOT" AND resolution is EMPTY '
             'AND status NOT IN ("Waiting for customer", Canceled, Cancelled) '
-            'AND ("Account type[Dropdown]" != "B2B" OR "Account type[Dropdown]" is EMPTY)'
+            'AND ("Account type[Dropdown]" != "B2B" OR "Account type[Dropdown]" is EMPTY) '
+            f'AND {SAC_NOT_MONITORING}'
         ),
         "resolved_scope_jql": (
             'project = SAC AND "Reporting Area" != Retail AND reporter != "SAC BOT" '
             'AND ("Account type[Dropdown]" != "B2B" OR "Account type[Dropdown]" is EMPTY) '
-            'AND resolution is not EMPTY AND resolution != Cancelled AND status NOT IN (Canceled, Cancelled)'
+            'AND resolution is not EMPTY AND resolution != Cancelled AND status NOT IN (Canceled, Cancelled) '
+            f'AND {SAC_NOT_MONITORING}'
         ),
         "inflow_jql": (
             'project = SAC AND "Reporting Area" != Retail AND reporter != "SAC BOT" '
             'AND ("Account type[Dropdown]" != "B2B" OR "Account type[Dropdown]" is EMPTY) '
             'AND created >= startofday() '
-            'AND status NOT IN (Canceled, Cancelled)'
+            'AND status NOT IN (Canceled, Cancelled) '
+            f'AND {SAC_NOT_MONITORING}'
         ),
         # SAC's "jql" above only covers tickets created today, so its open
         # backlog (created before today, still open) needs its own query.
@@ -169,7 +176,8 @@ CATEGORIES = {
             'project = SAC AND "Reporting Area" != Retail AND reporter != "SAC BOT" '
             'AND ("Account type[Dropdown]" != "B2B" OR "Account type[Dropdown]" is EMPTY) '
             'AND status NOT IN (Resolved, Closed, "Waiting for customer", Canceled, Cancelled) '
-            'AND created <= startOfDay()'
+            'AND created <= startOfDay() '
+            f'AND {SAC_NOT_MONITORING}'
         ),
         "breach_type": "sla_from_created",
         "severity_field": SEVERITY_FIELD,

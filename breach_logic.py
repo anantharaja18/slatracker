@@ -72,14 +72,18 @@ def _extract_option_value(raw):
 
 JIRA_SLA_FIELD = "customfield_10031"  # Jira's "Time to resolution" SLA (Jira Service Management)
 ESCALATION_PATH_FIELD = "customfield_10883"
-SLA_EXCLUDED_ESCALATION_PATHS = {"network", "a2p"}
+SLA_EXCLUDED_ESCALATION_PATHS = {"network", "a2p"}  # exact path names
+SLA_EXCLUDED_ESCALATION_TEXT = ("salesforce l3",)  # any path containing this text
 
 
 def is_excluded_open_breached(status, escalation_path):
-    """Escalated tickets on the Network or A2P path are left out of the open-breached
-    count and SLA % of the SLA by severity views and the Teams report."""
-    return (str(status or "").strip().lower() == "escalated"
-            and str(escalation_path or "").strip().lower() in SLA_EXCLUDED_ESCALATION_PATHS)
+    """Open tickets whose escalation path contains "Salesforce L3" (any status), and Escalated tickets
+    on the Network or A2P path, are left out of the open-breached count and SLA % of the SLA by severity
+    views, the Excel files and the Teams report."""
+    path = str(escalation_path or "").strip().lower()
+    if any(text in path for text in SLA_EXCLUDED_ESCALATION_TEXT):
+        return True
+    return str(status or "").strip().lower() == "escalated" and path in SLA_EXCLUDED_ESCALATION_PATHS
 
 
 def _sla_cycle(issue):

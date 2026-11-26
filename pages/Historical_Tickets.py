@@ -12,8 +12,12 @@ import html
 from datetime import datetime, timedelta
 
 import altair as alt
+from zoneinfo import ZoneInfo
+
 import pandas as pd
 import streamlit as st
+
+PR_TZ = ZoneInfo("America/Puerto_Rico")
 from streamlit_autorefresh import st_autorefresh
 
 import breach_logic
@@ -130,14 +134,34 @@ def assignee_table_html(table, teams):
             '· SLA % = SLA Met ÷ (SLA Met + SLA not Met)</div>')
 
 
-def inflow_sheets(start, end, resolved):
-    """Excel sheets for the ticket details, split by when each ticket was created:
-    resolved from today's inflow (created the same day) and from past inflow."""
+def open_breached_sheet(start, end, open_rows):
+    """Open tickets breached now and created in the period, as rows of the ticket sheet (SLA not Met, still open).
+    These are the open part of the Summary's SLA not Met count."""
+    lo, hi = f"{start:%Y-%m-%d}", f"{end:%Y-%m-%d}"
+    part = open_rows[(open_rows["created"] >= lo) & (open_rows["created"] <= hi) & open_rows["breached"]]
+    part = part.drop_duplicates("key")
+    return pd.DataFrame({
+        "Key": part["key"].values, "Team": part["category"].values, "Summary": part["summary"].values,
+        "Severity": part["severity"].values, "Status": part["status"].values, "Assignee": part["assignee"].values,
+        "Created": part["created"].values, "Resolved": "", "SLA": "SLA not Met",
+        "Created & Resolved Same Day": "Still open", "Escalation Path": part["escalation"].values,
+        "Link": part["key"].map(jira_url).values,
+    })
+
+
+def inflow_sheets(start, end, resolved, open_rows):
+    """Excel sheets for the ticket details, split by when each ticket was created: resolved from today's
+    inflow (created the same day), with the open breached tickets added so the sheet matches the Summary,
+    and resolved from past inflow."""
     def sheet(which):
         part = ra.ticket_list(ra.by_inflow(resolved, which), start, end)
         return part.assign(Link=part["Key"].map(jira_url))
 
-    return {"Resolved from Today's Inflow": sheet(ra.INFLOW_SAME_DAY),
+    # Every resolved ticket created in the period (resolved on any later date too), as the Summary counts them.
+    created = ra.ticket_list(resolved, start, end, by="created")
+    created = created.assign(Link=created["Key"].map(jira_url))
+    today = pd.concat([created, open_breached_sheet(start, end, open_rows)], ignore_index=True)
+    return {"Resolved & Open - Inflow": today,
             "Resolved from Past Inflow": sheet(ra.INFLOW_PAST)}
 
 
@@ -176,11 +200,19 @@ boot = ui.loading("Loading resolved tickets&hellip; checking the Jira sync") if 
 ui.ensure_fresh(force=force)
 boot.empty()
 st.session_state["resolved_page_loaded"] = True
+def jira_and_pr(value, with_date=False):
+    """A PC-local time shown in Jira time and Puerto Rico time, e.g. "10:58:29 Jira time (EST) · 11:58:29 Puerto Rico time (AST)"."""
+    jira = breach_logic.to_jira_time(value)
+    pr = jira.astimezone(PR_TZ)
+    stamp = f"{jira:%d %b %Y %H:%M:%S}" if with_date else f"{jira:%H:%M:%S}"
+    return (f"{stamp} Jira time ({jira:%Z}) · {pr:%H:%M:%S} Puerto Rico time ({pr:%Z})")
+
+
 last_sync = trend_store.last_sync_time()
 bg = ui.BACKGROUND_STATUS
-st.caption((f"Jira data last synced {last_sync:%d %b %Y %H:%M:%S}" if last_sync else "Jira data not synced yet.")
+st.caption((f"Jira data last synced {jira_and_pr(last_sync, with_date=True)}" if last_sync else "Jira data not synced yet.")
            + f" · background refresh every {ui.BACKGROUND_SYNC_MINUTES} min, last attempt "
-           + (f"{bg['last_try']:%H:%M:%S} ({bg['result']})" if bg["last_try"] else "not yet"))
+           + (f"{jira_and_pr(bg['last_try'])} ({bg['result']})" if bg["last_try"] else "not yet"))
 data_loader = ui.loading_if_new("resolved_loaded_sync", last_sync.isoformat() if last_sync else None,
                                 "Loading resolved tickets&hellip; a year of Retail, SAC, B2B and Order Fallout")
 resolved = load_data(last_sync.isoformat()) if last_sync else pd.DataFrame()
@@ -233,11 +265,11 @@ for col, team in zip(cols, ["All teams", *ra.TEAMS]):
     color = ALL_COLOR if team == "All teams" else TEAM_COLOR[team]
     col.markdown(
         f'<div class="kpi" style="--cat:{color};"><div class="kpi-label">{team}</div>'
-        f'<div class="kpi-row"><span class="kpi-value">{s["resolved"]:,}</span>'
+        f'<div class="kpi-row"><span class="kpi-value">{s["judged"]:,}</span>'
         f'<span class="kpi-pct" style="color:{pct_color(s["pct"])};" title="SLA Met / (SLA Met + SLA not Met)">'
         f'{fmt_pct(s["pct"])} SLA</span></div>'
-        f'<div class="kpi-sub">{ui.delta_html(s["resolved"], s["prev"]["resolved"], higher_is_good=True)} vs '
-        f'{prev_label} ({s["prev"]["resolved"]:,}, SLA {fmt_pct(s["prev"]["pct"])})</div>'
+        f'<div class="kpi-sub">{ui.delta_html(s["judged"], s["prev"]["judged"], higher_is_good=True)} vs '
+        f'{prev_label} ({s["prev"]["judged"]:,}, SLA {fmt_pct(s["prev"]["pct"])})</div>'
         f'<div class="kpi-split">{s["within"]:,} SLA Met · {s["breached"]:,} SLA not Met '
         f'({s["late"]:,} SLA not Met on resolved + {s["open_breached"]:,} SLA not Met still open)</div></div>',
         unsafe_allow_html=True,
@@ -273,7 +305,7 @@ with st.container(border=True):
         """Excel: Summary (this table) and the resolved tickets sheets."""
         return ui.write_excel({
             "Summary": project_summary_frame(ra.sla_by_created(resolved, open_rows, start, end)),
-            **inflow_sheets(start, end, resolved),
+            **inflow_sheets(start, end, resolved, open_rows),
         })
 
 
@@ -463,7 +495,7 @@ def build_excel():
         "Trend": trend_sheet,
         "SLA by Severity": project_summary_frame(ra.sla_by_created(resolved, open_rows, start, end)),
         "By Assignee": assignees if not assignees.empty else pd.DataFrame({"Assignee": []}),
-        **inflow_sheets(start, end, resolved),
+        **inflow_sheets(start, end, resolved, open_rows),
     })
 
 

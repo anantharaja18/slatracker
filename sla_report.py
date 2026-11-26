@@ -65,10 +65,10 @@ def fetch_resolved_today():
     return all_rows[all_rows["Created Today"]]
 
 
-def fetch_open_breached_today():
-    """Open tickets whose SLA ran out today, per team (a team's backlog query
-    is included, as on the dashboard)."""
-    today = breach_logic.jira_now().date()
+def fetch_open_breached_today(day=None):
+    """Open tickets whose SLA ran out on `day` (default: today), per team (a team's backlog query
+    is included, as on the dashboard). For a past day: the tickets still open now that ran out that day."""
+    target = day or breach_logic.jira_now().date()
     rows = []
     for team, cat_config in config.CATEGORIES.items():
         jqls = [cat_config["jql"]]
@@ -89,7 +89,7 @@ def fetch_open_breached_today():
                 if breach_logic.is_excluded_open_breached(
                         (issue["fields"].get("status") or {}).get("name"), path):
                     continue  # Escalated on Network / A2P: not counted
-                if hours * 60 < 0 and due.date() >= today:
+                if hours * 60 < 0 and due.date() == target:
                     f = issue["fields"]
                     rows.append({"Team": team, "Key": issue["key"], "Severity": result["severity"] or "N/A",
                                  "Summary": f.get("summary") or "", "Status": (f.get("status") or {}).get("name", ""),
@@ -396,16 +396,18 @@ def build_eod_report(day):
     import ui_common  # Excel styling helper (write_excel)
 
     resolved_day = fetch_resolved_on_day(day)
-    empty_open = pd.DataFrame(columns=["Team", "Key", "Severity"])
-    frame = project_frame(resolved_day, empty_open)  # resolved only: no open tickets
+    opn = fetch_open_breached_today(day)  # tickets that ran out on `day` and are still open
+    # Today's inflow only (created on `day`), as on the dashboard, so the counts match its SLA table.
+    frame = project_frame(resolved_day[resolved_day["Created Today"]], opn)
     sheet = eod_ticket_sheet(resolved_day)
     os.makedirs(REPORTS_DIR, exist_ok=True)
     path = os.path.join(REPORTS_DIR, f"EOD_SLA_Report_{day:%Y-%m-%d}.xlsx")
+    same_day = sheet["Created & Resolved Same Day"] == "Yes"
+    inflow_sheet = pd.concat([sheet[same_day], _open_sheet_rows(opn)], ignore_index=True)
     with open(path, "wb") as f:
-        same_day = sheet["Created & Resolved Same Day"] == "Yes"
         f.write(ui_common.write_excel({
             "Summary": _summary_sheet(frame),
-            "Resolved from Today's Inflow": sheet[same_day],
+            "Resolved & Open - Inflow": inflow_sheet,
             "Resolved from Past Inflow": sheet[~same_day],
         }))
     return {
@@ -413,7 +415,8 @@ def build_eod_report(day):
         "as_of": (f"Tickets resolved {day:%d %b %Y} 00:00:00 to 23:59:59 Jira time ({breach_logic.JIRA_TZ}) · "
                   f"{len(resolved_day)} resolved tickets"),
         "rows": frame,
-        "footnote": f"Full ticket list ({len(sheet)} tickets, with Jira links) is in the Excel file {os.path.basename(path)}.",
+        "footnote": (f"Full ticket list ({len(sheet) + len(opn)} tickets, with Jira links) is in the Excel file "
+                     f"{os.path.basename(path)}."),
         "path": path,
     }
 
@@ -443,20 +446,27 @@ def png_summary(frame, title, subtitle):
     return sla_views.project_png(frame, title, subtitle)
 
 
+def _open_sheet_rows(opn):
+    """Open breached tickets as Excel ticket rows: SLA not Met, still open, with reason and Jira link."""
+    reasons = breach_reasons()
+    part = opn.assign(**{"Resolved": "", "Created & Resolved Same Day": "Still open", "SLA": "SLA not Met"})
+    part["Breached Reason"] = part["Key"].map(lambda key: reasons.get(key, ""))
+    part["Link"] = part["Key"].map(lambda key: f"{config.JIRA_BASE_URL.rstrip('/')}/browse/{key}")
+    return part
+
+
 def today_excel(rows, open_breached, day):
     """Excel for today's inflow: Summary, every ticket resolved today from today's inflow,
     and every open ticket breached now (same rules as the dashboard)."""
     import ui_common
     resolved_day = fetch_resolved_on_day(day)
     inflow = eod_ticket_sheet(resolved_day[resolved_day["Created Today"]])
-    open_sheet = open_breached.copy()
-    reasons = breach_reasons()
-    open_sheet["Breached Reason"] = open_sheet["Key"].map(lambda key: reasons.get(key, ""))
-    open_sheet["Link"] = open_sheet["Key"].map(lambda key: f"{config.JIRA_BASE_URL.rstrip('/')}/browse/{key}")
+    # Open breached tickets go into the same sheet as the resolved ones, so every SLA not Met in the
+    # Summary has a row here.
+    tickets = pd.concat([inflow, _open_sheet_rows(open_breached)], ignore_index=True)
     return ui_common.write_excel({
         "Summary": _summary_sheet(rows),
-        "Resolved Today (Inflow)": inflow,
-        "Open SLA not Met": open_sheet,
+        "Ticket Details": tickets,
     })
 
 
@@ -564,24 +574,53 @@ def text_table(parts):
 
 
 def html_table(parts):
-    """The report as an HTML <table> for a chat message."""
-    head = "".join(f'<th style="white-space:nowrap">{html.escape(h)}</th>' for h in _sla_headers())
+    """The report as an HTML <table> for a chat message, laid out like the dashboard table: a Project
+    column, Sev-1 and Sev-2 groups (SLA Met, SLA not Met, SLA Met %) and Overall SLA %, with coloured values."""
     headers = _sla_headers()
-    pct_columns = {i for i, h in enumerate(headers) if h.endswith("%")}
+    kinds = ["pct" if h.endswith("%") else "not" if "not Met" in h else "met" for h in headers[1:]]
+    # Legacy attributes (bgcolor, align) as well as inline styles: chat renderers keep attributes more reliably.
+    # A mid-dark header with white text reads on both the light and the dark Teams theme.
+    head_style = ('bgcolor="#4a4a63" align="center" style="background:#4a4a63;color:#ffffff;font-weight:bold;'
+                  'text-align:center;padding:6px 10px;border:1px solid #8a8aa0;"')
+    sub_style = ('bgcolor="#4a4a63" align="center" style="background:#4a4a63;color:#ffffff;'
+                 'text-align:center;padding:4px 8px;border:1px solid #8a8aa0;"')
+    head1 = (f'<tr><th rowspan="2" {head_style}>Project</th>'
+             + "".join(f'<th colspan="3" {head_style}>{html.escape(sev)} · SLA {mins // 60} h</th>'
+                       for sev, mins in config.SLA_MINUTES.items())
+             + f'<th rowspan="2" {head_style}>{html.escape(headers[-1])}</th></tr>')
+    head2 = "<tr>" + "".join(f'<th {sub_style}>{html.escape(h.split(" ", 1)[1])}</th>'
+                             for h in headers[1:-1]) + "</tr>"
 
-    def cell_html(i, v):
-        css = ["white-space:nowrap"]
-        if i in pct_columns and v != "—":
-            # Same thresholds as the dashboard: 90%+ green, 70-89% amber, below 70% red.
-            pct = float(v.rstrip("%"))
-            colour = "#4caf50" if pct >= 90 else "#ffb300" if pct >= 70 else "#e53935"
-            css += [f"color:{colour}", "font-weight:bold"]
-        align = "left" if i == 0 else "right"
-        return f'<td align="{align}" style="{";".join(css)}">{html.escape(str(v))}</td>'
+    def value_color(kind, v):
+        if v == "—":
+            return "#7a7a85"
+        if kind == "met":
+            return "#2e9e3e"
+        if kind == "not":
+            return "#d13438"
+        # Same thresholds as the dashboard: 90%+ green, 70-89% amber, below 70% red.
+        pct = float(v.rstrip("%"))
+        return "#2e9e3e" if pct >= 90 else "#e6a100" if pct >= 70 else "#d13438"
 
-    body = "".join("<tr>" + "".join(cell_html(i, v) for i, v in enumerate(_sla_values(r))) + "</tr>"
-                   for _, r in parts["rows"].iterrows())
-    return f'<table border="1" cellpadding="4"><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>'
+    body = []
+    for _, r in parts["rows"].iterrows():
+        is_total = r["Team"] == config.TOTAL_LABEL
+        # Total row: a translucent grey band, so the theme's own text colour stays readable on it.
+        row_style = ' style="background:rgba(140,140,165,0.35);font-weight:bold;"' if is_total else ""
+        bold = "font-weight:bold;" if is_total else ""
+        cells = []
+        for i, v in enumerate(_sla_values(r)):
+            v = str(v)
+            if i == 0:
+                cells.append(f'<td align="left" style="text-align:left;padding:6px 10px;border:1px solid #d9d9e0;{bold}">'
+                             f'{html.escape(v)}</td>')
+                continue
+            color = value_color(kinds[i - 1], v)
+            cells.append(f'<td align="center" style="text-align:center;color:{color};padding:6px 10px;'
+                         f'border:1px solid #d9d9e0;{bold}">{html.escape(v)}</td>')
+        body.append(f"<tr{row_style}>" + "".join(cells) + "</tr>")
+    return (f'<table border="1" cellspacing="0" cellpadding="4" style="border-collapse:collapse;">'
+            f"<thead>{head1}{head2}</thead><tbody>{''.join(body)}</tbody></table>")
 
 
 def post_test_text(kind, url, as_table=False):

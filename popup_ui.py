@@ -134,13 +134,35 @@ POPUP_SCRIPT = """
   // would otherwise run past the right side of the window.
   function openWrap(w) {
     w.classList.add("open");
+    placePopup(w);
+  }
+
+  // The popup is fixed to the window (so no table or page container clips it): below the row when
+  // there is room, otherwise above it, kept inside the window on the left and right.
+  function placePopup(w) {
     const pop = w.querySelector(".bucket-popup");
     if (!pop) return;
-    pop.classList.remove("align-right");
-    if (pop.getBoundingClientRect().right > doc.documentElement.clientWidth - 8) {
-      pop.classList.add("align-right");
-    }
+    const r = w.getBoundingClientRect();
+    pop.style.position = "fixed";
+    pop.style.right = "auto";
+    pop.style.bottom = "auto";
+    pop.style.minWidth = r.width + "px";
+    pop.style.left = "0px";
+    pop.style.top = "0px";
+    const pw = pop.offsetWidth, ph = pop.offsetHeight;
+    let left = r.left;
+    if (left + pw > win.innerWidth - 8) left = Math.max(8, r.right - pw);
+    let top = r.bottom;
+    if (top + ph > win.innerHeight - 8) top = Math.max(8, r.top - ph);
+    pop.style.left = left + "px";
+    pop.style.top = top + "px";
   }
+
+  // Keeps an open popup next to its row while the page scrolls.
+  doc.addEventListener("scroll", function () {
+    const open = doc.querySelector(".popup-wrap.open");
+    if (open) placePopup(open);
+  }, true);
 
   // Row left under the pointer when a popup is closed; it must not instantly
   // re-open, so it's ignored until the pointer moves off it.
